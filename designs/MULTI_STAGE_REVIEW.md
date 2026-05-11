@@ -7,7 +7,8 @@ The LLM is expected to output a JSON with a predefined structure after each step
 The exact output format varies depending on the stage, but follows a strict schema.
 
 There should be a mechanism to pass important context (e.g. chunks of the code)
-between stages. Their outputs will be aggregated and passed to Stage 8 (Deduplication).
+between stages. Their outputs will be aggregated and passed to Stage 8 (Deduplication
+and Consolidation).
 
 ## Context Pre-processing
 Before passing data to the stages, the orchestrator should prepare the context:
@@ -50,7 +51,10 @@ If the idea itself is dangerous or incorrect, raise a concern.
 **Expected input:** Commit message, diff, and relevant kernel knowledge prompts.
 **Expected output JSON:**
 ```json
-{ "concerns": ["concern description 1", "concern description 2"] }
+{
+  "concerns": ["concern description 1", "concern description 2"],
+  "dismissed_concerns": ["disproved concern 1", "disproved concern 2"]
+}
 ```
 
 ## Stage 2. High-level implementation verification
@@ -65,7 +69,10 @@ Do not focus on low-level memory or locking errors unless they indicate a failur
 **Expected input:** Commit message, diff, and relevant kernel knowledge prompts.
 **Expected output JSON:**
 ```json
-{ "concerns": ["concern description 1", "concern description 2"] }
+{
+  "concerns": ["concern description 1", "concern description 2"],
+  "dismissed_concerns": ["disproved concern 1", "disproved concern 2"]
+}
 ```
 
 ## Stage 3. Execution flow verification
@@ -79,7 +86,10 @@ Follow the exact rules for NULL pointer dereferences: reading a pointer field is
 **Expected input:** Diff, surrounding code context for modified functions, and relevant kernel knowledge prompts.
 **Expected output JSON:**
 ```json
-{ "concerns": ["concern description 1", "concern description 2"] }
+{
+  "concerns": ["concern description 1", "concern description 2"],
+  "dismissed_concerns": ["disproved concern 1", "disproved concern 2"]
+}
 ```
 
 ## Stage 4. Resource management
@@ -93,7 +103,10 @@ Pay special attention to error paths where resources might not be freed. Ensure 
 **Expected input:** Diff, surrounding code context, and relevant kernel knowledge prompts.
 **Expected output JSON:**
 ```json
-{ "concerns": ["concern description 1", "concern description 2"] }
+{
+  "concerns": ["concern description 1", "concern description 2"],
+  "dismissed_concerns": ["disproved concern 1", "disproved concern 2"]
+}
 ```
 
 ## Stage 5. Locking and synchronization
@@ -107,7 +120,10 @@ CRITICAL RCU RULE: Objects must be removed from data structures BEFORE calling `
 **Expected input:** Diff, surrounding code context, and relevant kernel knowledge prompts.
 **Expected output JSON:**
 ```json
-{ "concerns": ["concern description 1", "concern description 2"] }
+{
+  "concerns": ["concern description 1", "concern description 2"],
+  "dismissed_concerns": ["disproved concern 1", "disproved concern 2"]
+}
 ```
 
 ## Stage 6. Security audit
@@ -122,7 +138,10 @@ Do not report standard bugs unless they have a clear security implication.
 **Expected input:** Diff, surrounding code context, and relevant kernel knowledge prompts.
 **Expected output JSON:**
 ```json
-{ "concerns": ["concern description 1", "concern description 2"] }
+{
+  "concerns": ["concern description 1", "concern description 2"],
+  "dismissed_concerns": ["disproved concern 1", "disproved concern 2"]
+}
 ```
 
 ## Stage 7. Hardware engineer's review
@@ -131,26 +150,34 @@ This stage is dedicated to review of changes from hardware engineer's point of v
 **System Prompt:**
 You are a hardware engineer reviewing device driver changes.
 If this patch touches driver or hardware-specific code, review register accesses, IRQ handling, DMA mapping, and timing/delays.
-If the patch is purely generic software logic (e.g., VFS, core networking), output an empty concerns list.
+If the patch is purely generic software logic (e.g., VFS, core networking), output empty `concerns` and `dismissed_concerns` lists.
 
 **Expected input:** Diff, surrounding code context, and relevant kernel knowledge prompts.
 **Expected output JSON:**
 ```json
-{ "concerns": ["concern description 1", "concern description 2"] }
+{
+  "concerns": ["concern description 1", "concern description 2"],
+  "dismissed_concerns": ["disproved concern 1", "disproved concern 2"]
+}
 ```
 
 ## Stage 8. Deduplication and Consolidation
-This stage is dedicated to consolidating and deduplicating all concerns raised in previous stages (1-7). The LLM should group identical or overlapping concerns and merge them to produce a clean, unique list of concerns.
+This stage is dedicated to consolidating and deduplicating all `concerns` and
+`dismissed_concerns` raised in previous stages (1-7). The LLM should group identical
+or overlapping items and merge them to produce clean, unique lists.
 
 **System Prompt:**
 You are the lead reviewer consolidating feedback from multiple specialized analysts.
-You will be given a list of concerns generated by different review stages.
+You will be given lists of `concerns` and `dismissed_concerns` generated by different review stages.
 1. Group concerns that refer to the same root cause or the same line of code.
 2. Merge overlapping concerns into a single, comprehensive concern. Combine their reasonings if they complement each other.
-3. Ensure the output contains only unique concerns.
-4. Preserve the `preexisting` flag. If you merge a pre-existing concern with a newly introduced one, flag it based on the root cause.
+3. Group dismissed_concerns that investigated and disproved the same candidate concern.
+4. Merge overlapping dismissed_concerns into a single, comprehensive dismissed_concern. Combine their evidence if it complements each other.
+5. Ensure the output contains only unique concerns and unique dismissed_concerns.
+6. Preserve the `preexisting` flag for concerns. If you merge a pre-existing concern with a newly introduced one, flag it based on the root cause.
+7. dismissed_concerns do not need a `preexisting` flag.
 
-**Expected input:** Aggregated JSON list of all concerns from Stages 1-7.
+**Expected input:** Aggregated JSON lists of all `concerns` and `dismissed_concerns` from Stages 1-7.
 **Expected output JSON:**
 ```json
 {
@@ -160,6 +187,13 @@ You will be given a list of concerns generated by different review stages.
       "description": "Description of the concern.",
       "reasoning": "Reasoning steps.",
       "preexisting": false
+    }
+  ],
+  "dismissed_concerns": [
+    {
+      "type": "Category",
+      "description": "Description of the disproved concern.",
+      "reasoning": "Evidence proving the concern does not apply."
     }
   ]
 }
@@ -176,7 +210,7 @@ You will be given a list of deduplicated concerns.
 3. If context from subsequent patches in the series is provided, check if the concern is fixed later in the series. If so, discard it.
 4. Assign a severity (low, medium, high, critical) to each remaining valid finding and explain the reasoning.
 
-**Expected input:** Target commit diff, full series context (or subsequent diffs), and the deduplicated JSON list of concerns from Stage 8.
+**Expected input:** Target commit diff, full series context (or subsequent diffs), and the deduplicated JSON list of `concerns` from Stage 8.
 **Expected output JSON:**
 ```json
 {
