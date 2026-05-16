@@ -2076,8 +2076,8 @@ impl Reviewer {
                     };
                     let final_subject = format!("{}{}", subject_prefix, patch_subject);
                     let final_body = format!(
-                        "{}\nSashiko has reviewed this patch and found no issues. It looks great!\n",
-                        body_head
+                        "{}\nSashiko has reviewed this patch and found no issues. It looks great!\n\n-- \nSashiko AI review · {}\n",
+                        body_head, target_url
                     );
 
                     ctx.db
