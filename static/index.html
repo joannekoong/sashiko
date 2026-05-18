@@ -1822,6 +1822,7 @@
                                        if (out && out.findings && Array.isArray(out.findings)) {
                                            let current = { low: 0, medium: 0, high: 0, critical: 0 };
                                            out.findings.forEach(f => {
+                                               if (f.preexisting) return; // Skip preexisting findings for summary counts
                                                const s = String(f.severity || '').toLowerCase();
                                                if (s === 'critical') current.critical++;
                                                else if (s === 'high') current.high++;
