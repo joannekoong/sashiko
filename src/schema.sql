@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS findings (
     severity_explanation TEXT,
     problem TEXT,
     suggestion TEXT,
+    preexisting INTEGER, -- 0 = false, 1 = true
     FOREIGN KEY(review_id) REFERENCES reviews(id)
 );
 CREATE INDEX IF NOT EXISTS idx_findings_review_id ON findings(review_id);

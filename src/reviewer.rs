@@ -1266,6 +1266,7 @@ impl Reviewer {
                                         let severity_explanation = f["severity_explanation"]
                                             .as_str()
                                             .map(|s| s.to_string());
+                                        let preexisting = f["preexisting"].as_bool();
 
                                         let _ = ctx
                                             .db
@@ -1274,6 +1275,7 @@ impl Reviewer {
                                                 severity,
                                                 severity_explanation,
                                                 problem,
+                                                preexisting,
                                             })
                                             .await;
                                     }
