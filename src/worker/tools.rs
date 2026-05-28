@@ -994,7 +994,7 @@ fn glob_to_regex(glob: &str) -> Result<regex::Regex> {
 
 fn get_grep_regex() -> &'static regex::Regex {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"^(.+?)(:|-)([0-9]+)(:|-)(.*)$").unwrap())
+    RE.get_or_init(|| regex::Regex::new(r"^([a-zA-Z0-9_./-]+)(:|-)([0-9]+)(:|-)(.*)$").unwrap())
 }
 
 fn format_git_grep_output(stdout: &str, revision: &str, active_files: &[String]) -> String {
@@ -1460,6 +1460,8 @@ HEAD:drivers/gpu/drm/tegra/output.c:168:\t\toutput->ddc = of_find_i2c_adapter_by
 HEAD:drivers/gpu/drm/tegra/output.c-169-\t\tif (!output->ddc) {
 --
 HEAD:drivers/i2c/muxes/i2c-mux-gpio.c:80:\tadapter = of_find_i2c_adapter_by_node(adapter_np);
+--
+HEAD:drivers/i2c/busses/i2c-10-bit.c:20:\tfoo();
 ";
 
         let expected = "\
@@ -1469,8 +1471,12 @@ HEAD:drivers/i2c/muxes/i2c-mux-gpio.c:80:\tadapter = of_find_i2c_adapter_by_node
   169-\t\tif (!output->ddc) {
   --
 
+[file: drivers/i2c/busses/i2c-10-bit.c]
+  20:\tfoo();
+
 [file: drivers/i2c/muxes/i2c-mux-gpio.c]
-  80:\tadapter = of_find_i2c_adapter_by_node(adapter_np);";
+  80:\tadapter = of_find_i2c_adapter_by_node(adapter_np);
+  --";
 
         let formatted = super::format_git_grep_output(input, "HEAD", &[]);
         assert_eq!(formatted, expected);
