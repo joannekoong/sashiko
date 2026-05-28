@@ -18,7 +18,7 @@ use anyhow::{Result, anyhow, ensure};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+
 use tokio::process::Command;
 
 pub struct ToolBox {
@@ -1170,8 +1170,6 @@ impl ToolBox {
         }))
     }
 
-
-
     fn validate_path(&self, relative: &str, base: &Path) -> Result<PathBuf> {
         if relative.contains("..") || relative.starts_with("/") {
             return Err(anyhow!("Invalid path: {}", relative));
@@ -1611,8 +1609,6 @@ mod tests {
 
         Ok(())
     }
-
-
 
     #[tokio::test]
     async fn test_tool_normalization() -> Result<()> {
