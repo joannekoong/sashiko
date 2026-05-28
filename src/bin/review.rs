@@ -404,7 +404,7 @@ async fn main() -> Result<()> {
 
                         let mut worker = Worker::new(
                             provider,
-                            tools,
+                            std::sync::Arc::new(tools),
                             prompts,
                             WorkerConfig {
                                 max_input_tokens: settings.ai.max_input_tokens,

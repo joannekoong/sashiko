@@ -454,7 +454,7 @@ SPECIFICITY REQUIREMENT: Each inline comment MUST reference the exact function n
 
 pub struct Worker {
     provider: Arc<dyn AiProvider>,
-    tools: ToolBox,
+    tools: Arc<ToolBox>,
     prompts: PromptRegistry,
     global_history: Vec<AiMessage>,
     max_interactions: usize,
@@ -462,13 +462,12 @@ pub struct Worker {
     series_range: Option<String>,
     context_tag: Option<String>,
     stages: Option<Vec<u8>>,
-    action_history: Vec<(String, serde_json::Value)>,
 }
 
 impl Worker {
     pub fn new(
         provider: Arc<dyn AiProvider>,
-        tools: ToolBox,
+        tools: Arc<ToolBox>,
         prompts: PromptRegistry,
         config: WorkerConfig,
     ) -> Self {
@@ -482,7 +481,6 @@ impl Worker {
             series_range: config.series_range,
             context_tag: None,
             stages: config.stages,
-            action_history: Vec::new(),
         }
     }
 
@@ -773,7 +771,20 @@ You MUST respond with ONLY a JSON object, no other text. Example:
             }
         }
 
-        // Stages 1-7
+        // Initialize system message in global history once before running stages
+        if self.global_history.is_empty() {
+            self.global_history.push(AiMessage {
+                role: AiRole::System,
+                content: Some(clean_shared_context.clone()),
+                thought: None,
+                thought_signature: None,
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+
+        // Construct futures for Stages 1-7
+        let mut stage_futures = Vec::new();
         for stage in 1..=7 {
             if let Some(ref selected_stages) = self.stages {
                 if !selected_stages.contains(&stage) {
@@ -786,8 +797,6 @@ You MUST respond with ONLY a JSON object, no other text. Example:
                 continue;
             }
 
-            info!("Running Stage {}", stage);
-            let (stage_prompt, clean_stage_prompt) = self.prompts.get_stage_prompt(stage).await?;
             let system_prompt = if (3..=6).contains(&stage) {
                 shared_context_no_log.clone()
             } else {
@@ -799,168 +808,37 @@ You MUST respond with ONLY a JSON object, no other text. Example:
                 clean_shared_context.clone()
             };
 
-            let format_guidance = r#"TodoWrite compatibility: vendored prompts may ask you to add tasks or suspected bugs to TodoWrite. Do not call or mention TodoWrite. Treat those instructions as an internal checklist only. If that checklist identifies a concrete suspected bug, carry it forward as a JSON concern with file, function_or_symbol, line when known, triggering condition, and evidence. Do not output generic checklist progress as a concern.
-
-Once you have gathered sufficient information, return ONLY a JSON object with "concerns" and "dismissed_concerns" arrays.
-If you find no concerns and no dismissed concerns, return `{"concerns": [], "dismissed_concerns": []}`.
-If you find concerns, each must be an object with:
-- "type": A short category string.
-- "description": A clear description of the problem.
-- "reasoning": A step-by-step explanation.
-- "preexisting": A boolean value: `true` if this bug/vulnerability already existed in the codebase before these patches were applied, or `false` if the issue was newly introduced by the reviewed patchset.
-- "locations": An array of objects, each containing "file", "function_or_symbol", "line_range" (e.g., "120-125"), and "why_this_location_matters". Use `null` for "file", "function_or_symbol", or "line_range" when an issue is non-local or the exact value is not known. Do not invent line numbers; use `line_range: null` when the exact lines are not known and explain the triggering condition in "reasoning".
-
-Use the "dismissed_concerns" array ONLY for candidate concerns that you considered plausible, investigated, and disproved with concrete evidence. This is especially important when you first suspect a concern and then follow the evidence chain proving that it does NOT apply.
-If you find dismissed_concerns, each must use the same item schema as concerns except that dismissed_concerns do not need the "preexisting" field:
-- "type": A short category string.
-- "description": The candidate concern that was investigated and disproved.
-- "reasoning": A step-by-step explanation of the evidence proving the candidate concern does not apply.
-- "locations": An array of objects, each containing "file", "function_or_symbol", "line_range" (e.g., "145-150"), and "why_this_location_matters". Use `null` for unknown values. Do not invent line numbers.
-
-CRITICAL REVIEW DIRECTIVE: Do NOT dismiss concerns just because you assume the surrounding system or caller handles it perfectly. Do not be overly charitable to the existing code. If there is a missing initialization, an unhandled edge case, or a brittle logic flow, report it as a concern immediately. Assume the worst-case scenario where external inputs and caller states are malformed.
-
-Example:
-```json
-{
-  "concerns": [
-    {
-      "type": "Issue Category",
-      "description": "What is wrong.",
-      "reasoning": "Why it is wrong.",
-      "preexisting": false,
-      "locations": [
-        {
-          "file": "path/to/file.c",
-          "function_or_symbol": "function_name",
-          "line_range": "120-125",
-          "why_this_location_matters": "This is where the newly allocated resource is dropped on the error path."
+            stage_futures.push(self.execute_stage(stage, system_prompt, clean_system_prompt));
         }
-      ]
-    }
-  ],
-  "dismissed_concerns": [
-    {
-      "type": "Issue Category",
-      "description": "Possible missing cleanup when foo_init() fails after bar_alloc().",
-      "reasoning": "The concrete code path or ordering that proves this candidate concern does not apply.",
-      "locations": [
-        {
-          "file": "path/to/file.c",
-          "function_or_symbol": "function_name",
-          "line_range": "145-150",
-          "why_this_location_matters": "This is where the cleanup path proves the candidate leak does not apply."
-        }
-      ]
-    }
-  ]
-}
-```"#;
-            let user_prompt = format!("{}\n\n{}", stage_prompt, format_guidance);
-            let clean_user_prompt = format!("{}\n\n{}", clean_stage_prompt, format_guidance);
 
-            let mut outer_attempts = 0;
-            let max_outer_attempts = 3;
-            let mut success = false;
+        // Run planned stages concurrently
+        info!(
+            "Running {} planned stages concurrently",
+            stage_futures.len()
+        );
+        let stage_results = futures::future::try_join_all(stage_futures).await?;
 
-            while outer_attempts < max_outer_attempts && !success {
-                outer_attempts += 1;
+        // Consolidate results in deterministic order (already preserved by try_join_all)
+        for res in stage_results {
+            total_tokens_in += res.tokens_in;
+            total_tokens_out += res.tokens_out;
+            total_tokens_cached += res.tokens_cached;
 
-                let mut inner_attempts = 0;
-                let max_inner_attempts = 3;
-                let mut active_user_prompt = user_prompt.clone();
-                let mut active_clean_user_prompt = clean_user_prompt.clone();
+            append_stage_items(
+                &mut all_concerns,
+                &res.concerns,
+                res.stage,
+                "General",
+                "description",
+            );
+            append_stage_dismissed_concerns(
+                &mut all_dismissed_concerns,
+                &res.dismissed_concerns,
+                res.stage,
+            );
 
-                while inner_attempts < max_inner_attempts && !success {
-                    inner_attempts += 1;
-                    match self
-                        .run_ai_stage(
-                            stage,
-                            system_prompt.clone(),
-                            clean_system_prompt.clone(),
-                            active_user_prompt.clone(),
-                            active_clean_user_prompt.clone(),
-                        )
-                        .await
-                    {
-                        Ok((result_json, t_in, t_out, t_cached)) => {
-                            total_tokens_in += t_in;
-                            total_tokens_out += t_out;
-                            total_tokens_cached += t_cached;
-
-                            match required_stage_arrays(&result_json) {
-                                Ok((concerns, dismissed_concerns)) => {
-                                    append_stage_items(
-                                        &mut all_concerns,
-                                        concerns,
-                                        stage,
-                                        "General",
-                                        "description",
-                                    );
-                                    append_stage_dismissed_concerns(
-                                        &mut all_dismissed_concerns,
-                                        dismissed_concerns,
-                                        stage,
-                                    );
-                                    success = true;
-                                }
-                                Err(violation) => {
-                                    tracing::warn!(
-                                        "Stage {} format validation failed (inner attempt {}/{}): {}. Retrying with augmented prompt.",
-                                        stage,
-                                        inner_attempts,
-                                        max_inner_attempts,
-                                        violation
-                                    );
-                                    let reminder = format!(
-                                        "\n\nPrevious attempt was rejected: {violation}. You MUST return ONLY a JSON object containing 'concerns' and 'dismissed_concerns' arrays. If there are no concerns and no dismissed concerns, return `{{\"concerns\": [], \"dismissed_concerns\": []}}`."
-                                    );
-                                    active_user_prompt = format!("{}{}", user_prompt, reminder);
-                                    active_clean_user_prompt =
-                                        format!("{}{}", clean_user_prompt, reminder);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            // Fail fast for non-retryable errors — retrying would
-                            // likely just hit the same limit again.
-                            if e.downcast_ref::<ReviewError>().is_some() {
-                                warn!("Stage {} hit non-retryable error: {}", stage, e);
-                                return Err(e);
-                            }
-                            warn!(
-                                "Stage {} AI execution failed (inner attempt {}/{}): {}",
-                                stage, inner_attempts, max_inner_attempts, e
-                            );
-
-                            let err_msg = e.to_string();
-                            if err_msg.contains("RECITATION") || err_msg.contains("blocked") {
-                                let reminder = "\n\nIMPORTANT: Your previous response was blocked by a recitation filter. Please ensure you do NOT copy large blocks of code verbatim in your response. Describe code changes in prose, or use highly simplified pseudo-code if you must show code structure.";
-                                active_user_prompt = format!("{}{}", active_user_prompt, reminder);
-                                active_clean_user_prompt =
-                                    format!("{}{}", active_clean_user_prompt, reminder);
-                            }
-                        }
-                    }
-                }
-
-                if !success {
-                    warn!(
-                        "Stage {} outer attempt {}/{} failed to produce valid output.",
-                        stage, outer_attempts, max_outer_attempts
-                    );
-                }
-            }
-            if !success {
-                warn!(
-                    "Stage {} failed after {} outer attempts.",
-                    stage, max_outer_attempts
-                );
-                return Err(anyhow::anyhow!(
-                    "Stage {} failed to produce valid 'concerns' and 'dismissed_concerns' arrays after {} attempts — aborting review",
-                    stage,
-                    max_outer_attempts
-                ));
-            }
+            // Append history in order
+            self.global_history.extend(res.history);
         }
 
         if all_concerns.is_empty() {
@@ -1121,10 +999,11 @@ Example Output:
                 )
                 .await
             {
-                Ok((result_json, t_in, t_out, t_cached)) => {
+                Ok((result_json, t_in, t_out, t_cached, stage_history)) => {
                     total_tokens_in += t_in;
                     total_tokens_out += t_out;
                     total_tokens_cached += t_cached;
+                    self.global_history.extend(stage_history);
 
                     if let Some(c) = result_json.get("concerns") {
                         if c.is_array() {
@@ -1288,10 +1167,11 @@ Example Output:
                 )
                 .await
             {
-                Ok((result_json, t_in, t_out, t_cached)) => {
+                Ok((result_json, t_in, t_out, t_cached, stage_history)) => {
                     total_tokens_in += t_in;
                     total_tokens_out += t_out;
                     total_tokens_cached += t_cached;
+                    self.global_history.extend(stage_history);
 
                     if let Some(c) = result_json.get("concerns") {
                         if c.is_array() {
@@ -1402,10 +1282,11 @@ Example Output:
                 )
                 .await
             {
-                Ok((result_json, t_in, t_out, t_cached)) => {
+                Ok((result_json, t_in, t_out, t_cached, stage_history)) => {
                     total_tokens_in += t_in;
                     total_tokens_out += t_out;
                     total_tokens_cached += t_cached;
+                    self.global_history.extend(stage_history);
 
                     if let Some(f) = result_json.get("findings") {
                         if f.is_array() {
@@ -1489,10 +1370,11 @@ Example Output:
                     )
                     .await
                 {
-                    Ok((result_text, t_in, t_out, t_cached)) => {
+                    Ok((result_text, t_in, t_out, t_cached, stage_history)) => {
                         total_tokens_in += t_in;
                         total_tokens_out += t_out;
                         total_tokens_cached += t_cached;
+                        self.global_history.extend(stage_history);
                         if free_form_mode {
                             review_inline_text = result_text;
                             break;
@@ -1582,14 +1464,14 @@ Example Output:
     }
 
     async fn run_ai_stage(
-        &mut self,
+        &self,
         stage: u8,
         system_prompt: String,
         clean_system_prompt: String,
         user_prompt: String,
         clean_user_prompt: String,
-    ) -> Result<(Value, u32, u32, u32)> {
-        let (raw_text, t_in, t_out, t_cached) = self
+    ) -> Result<(Value, u32, u32, u32, Vec<AiMessage>)> {
+        let (raw_text, t_in, t_out, t_cached, stage_history) = self
             .run_ai_stage_raw(
                 stage,
                 system_prompt,
@@ -1603,18 +1485,19 @@ Example Output:
             let cands = find_json_candidates(&raw_text);
             cands.into_iter().last().unwrap_or(json!({}))
         });
-        Ok((parsed, t_in, t_out, t_cached))
+        Ok((parsed, t_in, t_out, t_cached, stage_history))
     }
 
     async fn run_ai_stage_raw(
-        &mut self,
+        &self,
         _stage: u8,
         system_prompt: String,
-        clean_system_prompt: String,
+        _clean_system_prompt: String,
         user_prompt: String,
         clean_user_prompt: String,
-    ) -> Result<(String, u32, u32, u32)> {
-        self.action_history.clear();
+    ) -> Result<(String, u32, u32, u32, Vec<AiMessage>)> {
+        let mut stage_action_history = Vec::new();
+        let mut stage_history = Vec::new();
         let mut local_history = Vec::new();
 
         let user_msg = AiMessage {
@@ -1627,20 +1510,7 @@ Example Output:
         };
         local_history.push(user_msg.clone());
 
-        if self.global_history.is_empty() {
-            // Keep a clean version for testing/history, we can just push the user prompt.
-            // But we don't have a clean sys_msg anymore as an AiMessage.
-            // Let's create an informational System message in global history just to record the context.
-            self.global_history.push(AiMessage {
-                role: AiRole::System,
-                content: Some(clean_system_prompt.clone()),
-                thought: None,
-                thought_signature: None,
-                tool_calls: None,
-                tool_call_id: None,
-            });
-        }
-        self.global_history.push(AiMessage {
+        stage_history.push(AiMessage {
             role: AiRole::User,
             content: Some(clean_user_prompt),
             thought: None,
@@ -1654,6 +1524,8 @@ Example Output:
         let mut t_out = 0;
         let mut t_cached = 0;
         let mut recitation_retries = 0;
+
+        let tools_ref = self.tools.clone();
 
         loop {
             turns += 1;
@@ -1723,7 +1595,7 @@ Example Output:
                 tool_call_id: None,
             };
             local_history.push(assistant_msg.clone());
-            self.global_history.push(assistant_msg);
+            stage_history.push(assistant_msg);
 
             if let Some(tool_calls) = resp.tool_calls {
                 let mut tool_responses_map = std::collections::HashMap::new();
@@ -1734,8 +1606,7 @@ Example Output:
                     let args = call.arguments.clone();
                     let call_id = call.id.clone();
 
-                    let is_duplicate = self
-                        .action_history
+                    let is_duplicate = stage_action_history
                         .last()
                         .map(|(last_name, last_args)| last_name == &name && last_args == &args)
                         .unwrap_or(false);
@@ -1753,7 +1624,7 @@ Example Output:
                             tool_call_id: Some(call_id),
                         });
                     } else {
-                        self.action_history.push((name.clone(), args.clone()));
+                        stage_action_history.push((name.clone(), args.clone()));
                         calls_to_run.push((call_id, name, args));
                     }
                 }
@@ -1761,7 +1632,7 @@ Example Output:
                 let futures: Vec<_> = calls_to_run
                     .into_iter()
                     .map(|(call_id, name, args)| {
-                        let tools = &self.tools;
+                        let tools = tools_ref.clone();
                         async move {
                             let res = match tools.call(&name, args).await {
                                 Ok(v) => v.to_string(),
@@ -1796,9 +1667,15 @@ Example Output:
                 }
 
                 local_history.extend(tool_responses.clone());
-                self.global_history.extend(tool_responses);
+                stage_history.extend(tool_responses);
             } else if resp.content.is_some() || resp.thought.is_some() {
-                return Ok((resp.content.unwrap_or_default(), t_in, t_out, t_cached));
+                return Ok((
+                    resp.content.unwrap_or_default(),
+                    t_in,
+                    t_out,
+                    t_cached,
+                    stage_history,
+                ));
             } else {
                 return Err(anyhow::anyhow!("No content or tool calls from AI"));
             }
@@ -1904,6 +1781,198 @@ Example Output:
         }
         None
     }
+
+    async fn execute_stage(
+        &self,
+        stage: u8,
+        system_prompt: String,
+        clean_system_prompt: String,
+    ) -> Result<StageExecutionResult> {
+        info!("Running Stage {}", stage);
+        let (stage_prompt, clean_stage_prompt) = self.prompts.get_stage_prompt(stage).await?;
+
+        let format_guidance = r#"TodoWrite compatibility: vendored prompts may ask you to add tasks or suspected bugs to TodoWrite. Do not call or mention TodoWrite. Treat those instructions as an internal checklist only. If that checklist identifies a concrete suspected bug, carry it forward as a JSON concern with file, function_or_symbol, line when known, triggering condition, and evidence. Do not output generic checklist progress as a concern.
+
+Once you have gathered sufficient information, return ONLY a JSON object with "concerns" and "dismissed_concerns" arrays.
+If you find no concerns and no dismissed concerns, return `{"concerns": [], "dismissed_concerns": []}`.
+If you find concerns, each must be an object with:
+- "type": A short category string.
+- "description": A clear description of the problem.
+- "reasoning": A step-by-step explanation.
+- "preexisting": A boolean value: `true` if this bug/vulnerability already existed in the codebase before these patches were applied, or `false` if the issue was newly introduced by the reviewed patchset.
+- "locations": An array of objects, each containing "file", "function_or_symbol", "line_range" (e.g., "120-125"), and "why_this_location_matters". Use `null` for "file", "function_or_symbol", or "line_range" when an issue is non-local or the exact value is not known. Do not invent line numbers; use `line_range: null` when the exact lines are not known and explain the triggering condition in "reasoning".
+
+Use the "dismissed_concerns" array ONLY for candidate concerns that you considered plausible, investigated, and disproved with concrete evidence. This is especially important when you first suspect a concern and then follow the evidence chain proving that it does NOT apply.
+If you find dismissed_concerns, each must use the same item schema as concerns except that dismissed_concerns do not need the "preexisting" field:
+- "type": A short category string.
+- "description": The candidate concern that was investigated and disproved.
+- "reasoning": A step-by-step explanation of the evidence proving the candidate concern does not apply.
+- "locations": An array of objects, each containing "file", "function_or_symbol", "line_range" (e.g., "145-150"), and "why_this_location_matters". Use `null` for unknown values. Do not invent line numbers.
+
+CRITICAL REVIEW DIRECTIVE: Do NOT dismiss concerns just because you assume the surrounding system or caller handles it perfectly. Do not be overly charitable to the existing code. If there is a missing initialization, an unhandled edge case, or a brittle logic flow, report it as a concern immediately. Assume the worst-case scenario where external inputs and caller states are malformed.
+
+Example:
+```json
+{
+  "concerns": [
+    {
+      "type": "Issue Category",
+      "description": "What is wrong.",
+      "reasoning": "Why it is wrong.",
+      "preexisting": false,
+      "locations": [
+        {
+          "file": "path/to/file.c",
+          "function_or_symbol": "function_name",
+          "line_range": "120-125",
+          "why_this_location_matters": "This is where the newly allocated resource is dropped on the error path."
+        }
+      ]
+    }
+  ],
+  "dismissed_concerns": [
+    {
+      "type": "Issue Category",
+      "description": "Possible missing cleanup when foo_init() fails after bar_alloc().",
+      "reasoning": "The concrete code path or ordering that proves this candidate concern does not apply.",
+      "locations": [
+        {
+          "file": "path/to/file.c",
+          "function_or_symbol": "function_name",
+          "line_range": "145-150",
+          "why_this_location_matters": "This is where the cleanup path proves the candidate leak does not apply."
+        }
+      ]
+    }
+  ]
+}
+```"#;
+
+        let user_prompt = format!("{}\n\n{}", stage_prompt, format_guidance);
+        let clean_user_prompt = format!("{}\n\n{}", clean_stage_prompt, format_guidance);
+
+        let mut total_tokens_in = 0;
+        let mut total_tokens_out = 0;
+        let mut total_tokens_cached = 0;
+
+        let mut concerns_out = Vec::new();
+        let mut dismissed_concerns_out = Vec::new();
+        let mut final_history = Vec::new();
+
+        let mut outer_attempts = 0;
+        let max_outer_attempts = 3;
+        let mut success = false;
+
+        while outer_attempts < max_outer_attempts && !success {
+            outer_attempts += 1;
+
+            let mut inner_attempts = 0;
+            let max_inner_attempts = 3;
+            let mut active_user_prompt = user_prompt.clone();
+            let mut active_clean_user_prompt = clean_user_prompt.clone();
+
+            while inner_attempts < max_inner_attempts && !success {
+                inner_attempts += 1;
+                match self
+                    .run_ai_stage(
+                        stage,
+                        system_prompt.clone(),
+                        clean_system_prompt.clone(),
+                        active_user_prompt.clone(),
+                        active_clean_user_prompt.clone(),
+                    )
+                    .await
+                {
+                    Ok((result_json, t_in, t_out, t_cached, stage_history)) => {
+                        total_tokens_in += t_in;
+                        total_tokens_out += t_out;
+                        total_tokens_cached += t_cached;
+                        final_history = stage_history;
+
+                        match required_stage_arrays(&result_json) {
+                            Ok((concerns, dismissed_concerns)) => {
+                                concerns_out = concerns.to_vec();
+                                dismissed_concerns_out = dismissed_concerns.to_vec();
+                                success = true;
+                            }
+                            Err(violation) => {
+                                tracing::warn!(
+                                    "Stage {} format validation failed (inner attempt {}/{}): {}. Retrying with augmented prompt.",
+                                    stage,
+                                    inner_attempts,
+                                    max_inner_attempts,
+                                    violation
+                                );
+                                let reminder = format!(
+                                    "\n\nPrevious attempt was rejected: {violation}. You MUST return ONLY a JSON object containing 'concerns' and 'dismissed_concerns' arrays. If there are no concerns and no dismissed concerns, return `{{\"concerns\": [], \"dismissed_concerns\": []}}`."
+                                );
+                                active_user_prompt = format!("{}{}", user_prompt, reminder);
+                                active_clean_user_prompt =
+                                    format!("{}{}", clean_user_prompt, reminder);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if e.downcast_ref::<ReviewError>().is_some() {
+                            warn!("Stage {} hit non-retryable error: {}", stage, e);
+                            return Err(e);
+                        }
+                        warn!(
+                            "Stage {} AI execution failed (inner attempt {}/{}): {}",
+                            stage, inner_attempts, max_inner_attempts, e
+                        );
+
+                        let err_msg = e.to_string();
+                        if err_msg.contains("RECITATION") || err_msg.contains("blocked") {
+                            let reminder = "\n\nIMPORTANT: Your previous response was blocked by a recitation filter. Please ensure you do NOT copy large blocks of code verbatim in your response. Describe code changes in prose, or use highly simplified pseudo-code if you must show code structure.";
+                            active_user_prompt = format!("{}{}", active_user_prompt, reminder);
+                            active_clean_user_prompt =
+                                format!("{}{}", active_clean_user_prompt, reminder);
+                        }
+                    }
+                }
+            }
+
+            if !success {
+                warn!(
+                    "Stage {} outer attempt {}/{} failed to produce valid output.",
+                    stage, outer_attempts, max_outer_attempts
+                );
+            }
+        }
+
+        if !success {
+            warn!(
+                "Stage {} failed after {} outer attempts.",
+                stage, max_outer_attempts
+            );
+            return Err(anyhow::anyhow!(
+                "Stage {} failed to produce valid 'concerns' and 'dismissed_concerns' arrays after {} attempts — aborting review",
+                stage,
+                max_outer_attempts
+            ));
+        }
+
+        Ok(StageExecutionResult {
+            stage,
+            concerns: concerns_out,
+            dismissed_concerns: dismissed_concerns_out,
+            tokens_in: total_tokens_in,
+            tokens_out: total_tokens_out,
+            tokens_cached: total_tokens_cached,
+            history: final_history,
+        })
+    }
+}
+
+struct StageExecutionResult {
+    stage: u8,
+    concerns: Vec<Value>,
+    dismissed_concerns: Vec<Value>,
+    tokens_in: u32,
+    tokens_out: u32,
+    tokens_cached: u32,
+    history: Vec<AiMessage>,
 }
 
 pub fn calculate_series_range(
@@ -2286,7 +2355,7 @@ mod tests {
             custom_prompt: None,
             stages: None,
         };
-        let mut worker = Worker::new(provider, tools, prompts, config);
+        let mut worker = Worker::new(provider, std::sync::Arc::new(tools), prompts, config);
 
         let patchset = serde_json::json!({
             "id": 1,
@@ -2518,7 +2587,7 @@ mod tests {
             custom_prompt: None,
             stages: None,
         };
-        let mut worker = Worker::new(provider, tools, prompts, config);
+        let worker = Worker::new(provider, std::sync::Arc::new(tools), prompts, config);
 
         let res = worker
             .run_ai_stage_raw(
@@ -2531,11 +2600,10 @@ mod tests {
             .await;
 
         assert!(res.is_ok());
+        let (_, _, _, _, stage_history) = res.unwrap();
+        assert_eq!(stage_history.len(), 6);
 
-        let history = &worker.global_history;
-        assert_eq!(history.len(), 7);
-
-        let blocked_msg = &history[5];
+        let blocked_msg = &stage_history[4];
         assert_eq!(blocked_msg.role, AiRole::Tool);
         let content = blocked_msg.content.as_ref().unwrap();
         assert!(content.contains("Duplicate tool call blocked"));
@@ -2557,7 +2625,7 @@ mod tests {
             custom_prompt: None,
             stages: None,
         };
-        let mut worker = Worker::new(provider, tools, prompts, config);
+        let worker = Worker::new(provider, std::sync::Arc::new(tools), prompts, config);
 
         let res = worker
             .run_ai_stage_raw(
@@ -2570,11 +2638,10 @@ mod tests {
             .await;
 
         assert!(res.is_ok());
+        let (_, _, _, _, stage_history) = res.unwrap();
+        assert_eq!(stage_history.len(), 8);
 
-        let history = &worker.global_history;
-        assert_eq!(history.len(), 9);
-
-        let response_msg = &history[7];
+        let response_msg = &stage_history[6];
         assert_eq!(response_msg.role, AiRole::Tool);
         let content = response_msg.content.as_ref().unwrap();
         assert!(!content.contains("Duplicate tool call detected"));
@@ -2650,7 +2717,7 @@ mod tests {
             custom_prompt: None,
             stages: Some(vec![1]),
         };
-        let mut worker = Worker::new(provider, tools, prompts, config);
+        let mut worker = Worker::new(provider, std::sync::Arc::new(tools), prompts, config);
 
         let patchset = serde_json::json!({
             "id": 1,
