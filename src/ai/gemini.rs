@@ -713,6 +713,19 @@ fn translate_ai_response(resp: GenerateContentResponse) -> Result<AiResponse> {
         }
     }
 
+    let truncated = candidate
+        .finish_reason
+        .as_ref()
+        .map(|r| r == "MAX_TOKENS")
+        .unwrap_or(false);
+
+    if truncated {
+        tracing::warn!(
+            "{}Gemini response truncated due to MAX_TOKENS.",
+            crate::ai::get_log_prefix()
+        );
+    }
+
     let usage = resp.usage_metadata.map(|m| AiUsage {
         prompt_tokens: m.prompt_token_count as usize,
         completion_tokens: m.candidates_token_count.unwrap_or(0) as usize,
@@ -738,6 +751,7 @@ fn translate_ai_response(resp: GenerateContentResponse) -> Result<AiResponse> {
             Some(tool_calls)
         },
         usage,
+        truncated,
     })
 }
 

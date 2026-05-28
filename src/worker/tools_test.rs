@@ -163,6 +163,47 @@ mod tests {
     }
 
     #[test]
+    fn test_git_blame_truncation() {
+        let (linux_path, _prompts_path) = get_test_paths();
+        let toolbox = ToolBox::new(linux_path, None);
+        let rt = Runtime::new().unwrap();
+
+        let args = json!({
+            "revision": "HEAD",
+            "path": "src/worker/prompts.rs",
+            "start_line": 1,
+            "end_line": 3000
+        });
+        let result = rt.block_on(toolbox.call("git_blame", args)).unwrap();
+        assert_eq!(result["truncated"].as_bool(), Some(true));
+
+        let content = result["content"].as_str().unwrap();
+        let returned_items = result["metadata"]["returned_items"].as_u64().unwrap() as usize;
+        let actual_lines = content.lines().count();
+
+        println!("git_blame returned_items metadata: {}", returned_items);
+        println!("git_blame actual returned content lines: {}", actual_lines);
+
+        assert!(actual_lines < 2400, "Blame was not truncated!");
+        // returned_items should match the actual lines returned excluding the warning line.
+        assert_eq!(
+            returned_items + 1,
+            actual_lines,
+            "returned_items metadata does not match actual lines returned (accounting for warning line)!"
+        );
+
+        // Verify end_index calculation is start_index + returned_items - 1
+        let start_index = result["metadata"]["start_index"].as_u64().unwrap();
+        let end_index = result["metadata"]["end_index"].as_u64().unwrap();
+        assert_eq!(end_index, start_index + returned_items as u64 - 1);
+
+        // Verify next_page_hint suggests end_index + 1
+        let hint = result["next_page_hint"].as_str().unwrap();
+        let expected_next_start = end_index + 1;
+        assert!(hint.contains(&format!("start_line={}", expected_next_start)));
+    }
+
+    #[test]
     fn test_git_grep_relative_path() {
         let (linux_path, _prompts_path) = get_test_paths();
         let toolbox = ToolBox::new(linux_path, None);
@@ -221,5 +262,78 @@ mod tests {
         let toolbox_disabled = ToolBox::new(linux_path, None);
         let result = rt.block_on(toolbox_disabled.call("read_prompt", args));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_git_read_files_truncation() {
+        let (linux_path, _prompts_path) = get_test_paths();
+        let toolbox = ToolBox::new(linux_path, None);
+        let rt = Runtime::new().unwrap();
+
+        let args = json!({
+            "revision": "HEAD",
+            "files": [
+                { "path": "src/worker/prompts.rs" }
+            ]
+        });
+
+        let result = rt.block_on(toolbox.call("git_read_files", args)).unwrap();
+        let results = result["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+
+        let res = &results[0];
+        assert_eq!(res["truncated"].as_bool(), Some(true));
+
+        let content = res["content"].as_str().unwrap();
+        let returned_items = res["metadata"]["returned_items"].as_u64().unwrap() as usize;
+        let actual_lines = content.lines().count();
+
+        // We expect actual_lines to match returned_items, or at least be extremely close (including warning lines).
+        // Currently, returned_items is slice.len() (2448), but content only has allowed_lines (~800) lines!
+        println!("returned_items metadata: {}", returned_items);
+        println!("actual returned content lines: {}", actual_lines);
+
+        assert!(
+            actual_lines < 2400,
+            "Content was not truncated! (should be around 800 lines)"
+        );
+        assert_eq!(
+            returned_items + 1,
+            actual_lines,
+            "returned_items metadata does not match actual lines returned (accounting for warning line)!"
+        );
+    }
+
+    #[test]
+    fn test_git_show_truncation() {
+        let (linux_path, _prompts_path) = get_test_paths();
+        let toolbox = ToolBox::new(linux_path, None);
+        let rt = Runtime::new().unwrap();
+
+        let args = json!({
+            "object": "HEAD:src/worker/prompts.rs",
+            "start_line": 1,
+            "end_line": 3000
+        });
+
+        let result = rt.block_on(toolbox.call("git_show", args)).unwrap();
+        assert_eq!(result["truncated"].as_bool(), Some(true));
+
+        let content = result["content"].as_str().unwrap();
+        let returned_items = result["metadata"]["returned_items"].as_u64().unwrap() as usize;
+        let actual_lines = content.lines().count();
+
+        println!("git_show returned_items metadata: {}", returned_items);
+        println!("git_show actual returned content lines: {}", actual_lines);
+
+        assert!(
+            actual_lines < 2400,
+            "Content was not truncated! (should be around 800 lines)"
+        );
+        assert_eq!(
+            returned_items + 1,
+            actual_lines,
+            "git_show returned_items metadata does not match actual lines returned (accounting for warning line)!"
+        );
     }
 }

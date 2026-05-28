@@ -2268,6 +2268,7 @@ mod tests {
                 thought_signature: None,
                 tool_calls: None,
                 usage: None,
+                truncated: false,
             })
         }
         fn estimate_tokens(&self, _request: &AiRequest) -> usize {
@@ -2321,6 +2322,7 @@ mod tests {
                 thought_signature: None,
                 tool_calls: None,
                 usage: None,
+                truncated: false,
             })
         }
 
@@ -2774,6 +2776,7 @@ fi
                     total_tokens: self.prompt_tokens + self.completion_tokens,
                     cached_tokens: Some(self.cached_tokens),
                 }),
+                truncated: false,
             })
         }
         fn estimate_tokens(&self, _request: &AiRequest) -> usize {

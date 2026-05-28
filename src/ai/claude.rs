@@ -552,6 +552,19 @@ pub fn translate_ai_response(resp: &ClaudeResponse) -> Result<AiResponse> {
         },
     };
 
+    let truncated = resp
+        .stop_reason
+        .as_ref()
+        .map(|r| r == "max_tokens")
+        .unwrap_or(false);
+
+    if truncated {
+        tracing::warn!(
+            "{}Claude response truncated due to max_tokens.",
+            crate::ai::get_log_prefix()
+        );
+    }
+
     Ok(AiResponse {
         content: if content.is_empty() {
             None
@@ -574,6 +587,7 @@ pub fn translate_ai_response(resp: &ClaudeResponse) -> Result<AiResponse> {
             Some(tool_calls)
         },
         usage: Some(usage),
+        truncated,
     })
 }
 

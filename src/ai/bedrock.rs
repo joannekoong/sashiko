@@ -396,6 +396,7 @@ fn translate_response(
             Some(tool_calls)
         },
         usage,
+        truncated: false,
     })
 }
 

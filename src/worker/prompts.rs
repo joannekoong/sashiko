@@ -33,6 +33,9 @@ pub enum ReviewError {
     /// violated constraint rather than repeating the identical request.
     #[error("Format validation failed: {0}")]
     FormatRejection(String),
+    /// The AI response was truncated by the provider (e.g., hit max tokens).
+    #[error("AI response truncated by provider limit")]
+    OutputTruncated,
 }
 
 impl ClassifyAiError for ReviewError {
@@ -41,6 +44,7 @@ impl ClassifyAiError for ReviewError {
             ReviewError::LimitExceeded => AiErrorClass::Fatal,
             ReviewError::BudgetExceeded(_) => AiErrorClass::Fatal,
             ReviewError::FormatRejection(_) => AiErrorClass::Fatal,
+            ReviewError::OutputTruncated => AiErrorClass::Fatal,
         }
     }
 }
@@ -172,12 +176,14 @@ impl PromptRegistry {
         content.push_str(&date_fact);
         content.push_str("You are an expert Linux kernel maintainer. Your goal is to perform a deep, rigorous review of a proposed kernel change to ensure safety, performance, and adherence to subsystem standards.\n\n");
         content.push_str("TOOL USAGE: When you need to gather information using tools, actively batch parallel or independent tool calls into a single response to minimize the number of conversation turns.\n\n");
+        content.push_str("TRUNCATION & PAGINATION MANAGEMENT:\nMany of your information-gathering tools (such as `git_read_files`, `git_diff`, `git_show`, `git_grep`, `git_log`) will truncate their output if it exceeds token limits to protect the context window. When truncation occurs, the tool's JSON response will contain `\"truncated\": true` and a `\"next_page_hint\"` explaining how to fetch the next slice of data. You MUST actively check for the `\"truncated\"` flag in every tool response. If `\"truncated\"` is `true`, you MUST NOT assume you have the complete picture. You are REQUIRED to follow the `\"next_page_hint\"` and make subsequent tool calls with adjusted parameters (e.g., `start_line`, `end_line`, narrower `paths`) to fetch the remaining content before finalizing your analysis. Failing to retrieve truncated content is a failure of rigor.\n\n");
         content.push_str("<global_review_guidelines>\n");
         content.push_str("The following documents contain the official technical patterns, architectural rules, and subsystem-specific guidelines that you MUST adhere to during your review. Use these as the absolute source of truth for identifying anti-patterns and violations.\n\n");
 
         clean.push_str(&date_fact);
         clean.push_str("You are an expert Linux kernel maintainer. Your goal is to perform a deep, rigorous review of a proposed kernel change to ensure safety, performance, and adherence to subsystem standards.\n\n");
         clean.push_str("TOOL USAGE: When you need to gather information using tools, actively batch parallel or independent tool calls into a single response to minimize the number of conversation turns.\n\n");
+        clean.push_str("TRUNCATION & PAGINATION MANAGEMENT:\nMany of your information-gathering tools (such as `git_read_files`, `git_diff`, `git_show`, `git_grep`, `git_log`) will truncate their output if it exceeds token limits to protect the context window. When truncation occurs, the tool's JSON response will contain `\"truncated\": true` and a `\"next_page_hint\"` explaining how to fetch the next slice of data. You MUST actively check for the `\"truncated\"` flag in every tool response. If `\"truncated\"` is `true`, you MUST NOT assume you have the complete picture. You are REQUIRED to follow the `\"next_page_hint\"` and make subsequent tool calls with adjusted parameters (e.g., `start_line`, `end_line`, narrower `paths`) to fetch the remaining content before finalizing your analysis. Failing to retrieve truncated content is a failure of rigor.\n\n");
         clean.push_str("<global_review_guidelines>\n");
         clean.push_str("The following documents contain the official technical patterns, architectural rules, and subsystem-specific guidelines that you MUST adhere to during your review. Use these as the absolute source of truth for identifying anti-patterns and violations.\n\n");
 
@@ -1662,6 +1668,10 @@ Example Output:
 
             let resp = self.provider.generate_content(request).await?;
 
+            if resp.truncated {
+                return Err(ReviewError::OutputTruncated.into());
+            }
+
             if let Some(usage) = &resp.usage {
                 t_in += usage.prompt_tokens as u32;
                 t_out += usage.completion_tokens as u32;
@@ -1798,6 +1808,10 @@ Example Output:
                 return None;
             }
         };
+        if resp.truncated {
+            warn!("{} completion truncated by provider limit", label);
+            return None;
+        }
         if let Some(usage) = &resp.usage {
             accumulate(tokens, usage);
         }
@@ -1828,6 +1842,10 @@ Example Output:
                 });
                 match self.provider.generate_content(retry_req).await {
                     Ok(resp2) => {
+                        if resp2.truncated {
+                            warn!("{} retry completion truncated by provider limit", label);
+                            return None;
+                        }
                         if let Some(usage) = &resp2.usage {
                             accumulate(tokens, usage);
                         }
@@ -2335,6 +2353,7 @@ mod tests {
                         thought_signature: None,
                     }]),
                     usage: None,
+                    truncated: false,
                 })
             } else if turn == 1 {
                 Ok(crate::ai::AiResponse {
@@ -2348,6 +2367,7 @@ mod tests {
                         thought_signature: None,
                     }]),
                     usage: None,
+                    truncated: false,
                 })
             } else {
                 Ok(crate::ai::AiResponse {
@@ -2356,6 +2376,7 @@ mod tests {
                     thought_signature: None,
                     tool_calls: None,
                     usage: None,
+                    truncated: false,
                 })
             }
         }
@@ -2393,6 +2414,7 @@ mod tests {
                         thought_signature: None,
                     }]),
                     usage: None,
+                    truncated: false,
                 })
             } else if turn == 1 {
                 Ok(crate::ai::AiResponse {
@@ -2406,6 +2428,7 @@ mod tests {
                         thought_signature: None,
                     }]),
                     usage: None,
+                    truncated: false,
                 })
             } else if turn == 2 {
                 Ok(crate::ai::AiResponse {
@@ -2419,6 +2442,7 @@ mod tests {
                         thought_signature: None,
                     }]),
                     usage: None,
+                    truncated: false,
                 })
             } else {
                 Ok(crate::ai::AiResponse {
@@ -2427,6 +2451,7 @@ mod tests {
                     thought_signature: None,
                     tool_calls: None,
                     usage: None,
+                    truncated: false,
                 })
             }
         }

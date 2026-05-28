@@ -462,6 +462,15 @@ fn translate_ai_response(resp: OpenAiResponse) -> Result<AiResponse> {
             .collect()
     });
 
+    let truncated = choice.finish_reason == "length";
+
+    if truncated {
+        tracing::warn!(
+            "{}OpenAI response truncated due to finish_reason = length.",
+            crate::ai::get_log_prefix()
+        );
+    }
+
     let usage = Some(AiUsage {
         prompt_tokens: resp.usage.prompt_tokens as usize,
         completion_tokens: resp.usage.completion_tokens as usize,
@@ -475,6 +484,7 @@ fn translate_ai_response(resp: OpenAiResponse) -> Result<AiResponse> {
         thought_signature: None,
         tool_calls,
         usage,
+        truncated,
     })
 }
 

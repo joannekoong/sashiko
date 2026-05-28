@@ -143,6 +143,9 @@ pub struct AiResponse {
     pub tool_calls: Option<Vec<ToolCall>>,
     /// Optional token usage information.
     pub usage: Option<AiUsage>,
+    /// Whether the response was truncated by the provider (e.g., hit max tokens).
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// Classifies a remote AI error using the typed stdio protocol payload.
