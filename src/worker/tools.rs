@@ -49,28 +49,27 @@ impl ToolBox {
     /// Returns generic tool declarations.
     pub fn get_declarations_generic(&self) -> Vec<AiTool> {
         let mut decls = vec![
-            AiTool {
+             AiTool {
                 name: "git_read_files".to_string(),
-                description: "Read the content of one or more files at a specific Git revision. 'smart' mode is HIGHLY RECOMMENDED for large files as it collapses irrelevant code around focus lines to save tokens."
-                    .to_string(),
+                description: "Read files at a Git revision. Use 'smart' mode to collapse code around line ranges and save tokens.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "revision": { "type": "string", "description": "The Git commit SHA or reference (e.g., HEAD, baseline SHA, or target commit SHA) to read from." },
+                        "revision": { "type": "string", "description": "Git SHA or reference to read from." },
                         "files": {
                             "type": "array",
-                            "description": "List of files to read (maximum 10 files per request).",
+                            "description": "List of files to read (max 10).",
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "path": { "type": "string", "description": "Relative path to the file." },
-                                    "start_line": { "type": "integer", "description": "1-based start line (optional). In smart mode, this is the start of the focus area." },
-                                    "end_line": { "type": "integer", "description": "1-based end line (optional). In smart mode, this is the end of the focus area." }
+                                    "path": { "type": "string", "description": "File path." },
+                                    "start_line": { "type": "integer", "description": "Focus start line (optional)." },
+                                    "end_line": { "type": "integer", "description": "Focus end line (optional)." }
                                 },
                                 "required": ["path"]
                             }
                         },
-                        "mode": { "type": "string", "enum": ["raw", "smart"], "description": "Read mode. 'smart' mode is highly recommended to avoid truncation and save tokens. Defaults to 'raw'." }
+                        "mode": { "type": "string", "enum": ["raw", "smart"], "description": "Read mode: 'raw' (exact lines) or 'smart' (collapses code around range). Default: 'raw'." }
                     },
                     "required": ["revision", "files"]
                 }),
@@ -114,13 +113,13 @@ impl ToolBox {
                 parameters: json!({
                         "type": "object",
                         "properties": {
-                            "object": { "type": "string", "description": "The object to show (e.g. 'HEAD:README.md' or 'HEAD')." },
-                            "suppress_diff": { "type": "boolean", "description": "If true, suppresses the diff output for commits (shows only metadata). Useful for checking commit details cheaply." },
-                            "start_line": { "type": "integer", "description": "1-based start line (optional). Useful for reading specific parts of a file (blob)." },
-                            "end_line": { "type": "integer", "description": "1-based end line (optional)." },
+                            "object": { "type": "string", "description": "Git object specifier (e.g. 'HEAD:README.md' or 'HEAD')." },
+                            "suppress_diff": { "type": "boolean", "description": "If true, suppresses commit diff output." },
+                            "start_line": { "type": "integer", "description": "Focus start line (blobs only, optional)." },
+                            "end_line": { "type": "integer", "description": "Focus end line (blobs only, optional)." },
                             "paths": {
                                 "type": "array",
-                                "description": "Optional relative file or directory paths to filter the show output (only applicable to commits) (e.g. ['fs/', 'kernel/']).",
+                                "description": "Path filters (commits only, optional).",
                                 "items": { "type": "string" }
                             },
                             "mode": { "type": "string", "enum": ["raw", "smart"], "description": "Read mode for blobs: 'raw' (exact lines) or 'smart' (collapses code around range). Default: 'raw'." }
@@ -152,18 +151,18 @@ impl ToolBox {
                     "required": ["revision", "path"]
                 }),
             },
-            AiTool {
+             AiTool {
                 name: "git_grep".to_string(),
                 description: "Search for a pattern in files using git grep at a specific Git revision. Returns matching lines with context.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "revision": { "type": "string", "description": "The Git commit SHA or reference to search at." },
-                        "pattern": { "type": "string", "description": "Regex pattern to search for (or literal search string if is_literal is true)." },
-                        "path": { "type": "string", "description": "Space-separated list of relative path prefixes or patterns to restrict the search (optional). HIGHLY RECOMMENDED: Always restrict your search to the directories of the files modified by the patch (e.g., 'net/mptcp/' or 'drivers/gpu/drm/') unless you are explicitly looking for a global kernel symbol definition. Tree-wide searches without path constraints are extremely slow, prone to truncation, and waste token budget." },
-                        "context_lines": { "type": "integer", "description": "Number of context lines to show (default 0)." },
-                        "count_only": { "type": "boolean", "description": "If true, returns only the list of files and the count of matches in each file, without the actual line content. Highly recommended for cheap broad searches." },
-                        "is_literal": { "type": "boolean", "description": "If true, treats pattern as a literal C/C++ string rather than a PCRE regex. Highly recommended when searching for literal code containing unescaped parentheses like 'exit_mm('." }
+                        "revision": { "type": "string", "description": "Git commit SHA or reference to search at." },
+                        "pattern": { "type": "string", "description": "Regex or literal pattern to search." },
+                        "path": { "type": "string", "description": "Relative paths or pathspecs to restrict search (optional). Highly recommended to scope to the modified subsystem directory (e.g. 'net/mptcp/') to avoid extremely expensive tree-wide searches." },
+                        "context_lines": { "type": "integer", "description": "Context lines to show. Default: 0." },
+                        "count_only": { "type": "boolean", "description": "If true, returns file names and match counts only. Recommended for cheap broad searches." },
+                        "is_literal": { "type": "boolean", "description": "If true, treats pattern as literal fixed string rather than PCRE regex." }
                     },
                     "required": ["revision", "pattern"]
                 }),
