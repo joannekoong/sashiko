@@ -3395,7 +3395,24 @@ impl Database {
     }
 
     pub async fn rerun_patchset(&self, id: i64) -> Result<()> {
-        // 1. Reset patchset status to Pending
+        // 1. Get current status of the patchset
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT status FROM patchsets WHERE id = ?",
+                libsql::params![id],
+            )
+            .await?;
+
+        let mut current_status = None;
+        if let Ok(Some(row)) = rows.next().await {
+            let status: String = row.get(0)?;
+            current_status = Some(status);
+        }
+
+        let should_increment = current_status.as_deref() == Some("Reviewed");
+
+        // 2. Reset patchset status to Pending
         self.conn
             .execute(
                 "UPDATE patchsets SET status = 'Pending' WHERE id = ?",
@@ -3403,10 +3420,20 @@ impl Database {
             )
             .await?;
 
-        // 2. Increment target_review_count
+        // 3. Increment target_review_count only if it was previously Reviewed
+        if should_increment {
+            self.conn
+                .execute(
+                    "UPDATE patchsets SET target_review_count = COALESCE(target_review_count, 1) + 1 WHERE id = ?",
+                    libsql::params![id],
+                )
+                .await?;
+        }
+
+        // 4. Delete failed reviews that block retrying (infra failures)
         self.conn
             .execute(
-                "UPDATE patchsets SET target_review_count = COALESCE(target_review_count, 1) + 1 WHERE id = ?",
+                "DELETE FROM reviews WHERE patchset_id = ? AND status IN ('Failed', 'FailedToApply') AND interaction_id IS NULL",
                 libsql::params![id],
             )
             .await?;
@@ -5133,6 +5160,247 @@ mod tests {
         .unwrap();
 
         assert!(!db.has_failed_review(ps_id, patch_id, None).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_rerun_patchset_logic() {
+        let db = setup_db().await;
+
+        // Setup patchset
+        let thread_id = db.create_thread("root", "Subject", 100).await.unwrap();
+
+        // Create messages to satisfy FK constraints
+        db.create_message(
+            "msg_cl1", thread_id, None, "Author", "Cover 1", 100, "", "", "", None, None,
+        )
+        .await
+        .unwrap();
+        db.create_message(
+            "msg_p1",
+            thread_id,
+            Some("msg_cl1"),
+            "Author",
+            "Patch 1",
+            100,
+            "",
+            "",
+            "",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.create_message(
+            "msg_cl2", thread_id, None, "Author", "Cover 2", 100, "", "", "", None, None,
+        )
+        .await
+        .unwrap();
+        db.create_message(
+            "msg_p2",
+            thread_id,
+            Some("msg_cl2"),
+            "Author",
+            "Patch 2",
+            100,
+            "",
+            "",
+            "",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Create a patchset that is "Reviewed"
+        let ps_reviewed = db
+            .create_patchset(
+                thread_id,
+                Some("msg_cl1"),
+                "msg_cl1",
+                "Subject Reviewed",
+                "Author",
+                100,
+                1,
+                1,
+                "",
+                "",
+                None,
+                1,
+                None,
+                true,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        db.update_patchset_status(ps_reviewed, "Reviewed")
+            .await
+            .unwrap();
+
+        // Create a patchset that is "Failed"
+        let ps_failed = db
+            .create_patchset(
+                thread_id,
+                Some("msg_cl2"),
+                "msg_cl2",
+                "Subject Failed",
+                "Author",
+                100,
+                1,
+                1,
+                "",
+                "",
+                None,
+                1,
+                None,
+                true,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        db.update_patchset_status(ps_failed, "Failed")
+            .await
+            .unwrap();
+
+        // Add a patch to ps_failed
+        let patch_id = db
+            .create_patch(ps_failed, "msg_p2", 1, "diff")
+            .await
+            .unwrap();
+
+        // Add a failed review without interaction (infra failure) to ps_failed
+        let review_infra = db
+            .create_review(ps_failed, Some(patch_id), "p", "m", None, None)
+            .await
+            .unwrap();
+        db.update_review_status(review_infra, "FailedToApply", None)
+            .await
+            .unwrap();
+
+        // Add a failed review WITH interaction (AI failure) to ps_failed
+        let review_ai = db
+            .create_review(ps_failed, Some(patch_id), "p", "m", None, None)
+            .await
+            .unwrap();
+        db.create_ai_interaction(AiInteractionParams {
+            id: "int_id2",
+            parent_id: None,
+            workflow_id: None,
+            provider: "p",
+            model: "m",
+            input: "",
+            output: "",
+            tokens_in: 0,
+            tokens_out: 0,
+            tokens_cached: 0,
+        })
+        .await
+        .unwrap();
+        db.complete_review(
+            review_ai,
+            "Failed",
+            "desc",
+            None,
+            Some("int_id2"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Verify initial target counts (should be 1)
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT target_review_count FROM patchsets WHERE id = ?",
+                libsql::params![ps_reviewed],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let target: i64 = row.get(0).unwrap();
+        assert_eq!(target, 1);
+
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT target_review_count FROM patchsets WHERE id = ?",
+                libsql::params![ps_failed],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let target: i64 = row.get(0).unwrap();
+        assert_eq!(target, 1);
+
+        // Verify blocking review is present
+        assert!(
+            db.has_failed_review(ps_failed, patch_id, None)
+                .await
+                .unwrap()
+        );
+
+        // RERUN Reviewed patchset -> Should increment target count
+        db.rerun_patchset(ps_reviewed).await.unwrap();
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT target_review_count FROM patchsets WHERE id = ?",
+                libsql::params![ps_reviewed],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let target: i64 = row.get(0).unwrap();
+        assert_eq!(target, 2);
+
+        // RERUN Failed patchset -> Should NOT increment target count
+        db.rerun_patchset(ps_failed).await.unwrap();
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT target_review_count FROM patchsets WHERE id = ?",
+                libsql::params![ps_failed],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let target: i64 = row.get(0).unwrap();
+        assert_eq!(target, 1);
+
+        // Verify blocking review was deleted
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT 1 FROM reviews WHERE id = ?",
+                libsql::params![review_infra],
+            )
+            .await
+            .unwrap();
+        assert!(rows.next().await.unwrap().is_none());
+
+        // Verify blocking review is NO LONGER blocking
+        assert!(
+            !db.has_failed_review(ps_failed, patch_id, None)
+                .await
+                .unwrap()
+        );
+
+        // Verify AI failure review is NOT cancelled (remains Failed)
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT status FROM reviews WHERE id = ?",
+                libsql::params![review_ai],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let status: String = row.get(0).unwrap();
+        assert_eq!(status, "Failed");
     }
 
     #[tokio::test]
