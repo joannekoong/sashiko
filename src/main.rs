@@ -535,6 +535,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize custom remotes
     let repo_path = std::path::PathBuf::from(&settings.git.repository_path);
 
+    // Clean up stale worktree directories on disk first
+    let worktree_path = std::path::PathBuf::from(&settings.review.worktree_dir);
+    if let Err(e) = sashiko::git_ops::cleanup_worktree_dir(&worktree_path).await {
+        error!("Failed to clean up stale worktree directories: {}", e);
+    }
+
     // Prune stale worktrees on startup to prevent "bad object" fetch failures
     if let Err(e) = sashiko::git_ops::prune_worktrees(&repo_path).await {
         error!("Failed to prune stale worktrees: {}", e);

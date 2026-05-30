@@ -21,7 +21,7 @@ use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
 use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 pub const GIT_PROTOCOL_RESTRICTIONS: &[&str] = &[
     "-c",
@@ -350,6 +350,35 @@ pub async fn prune_worktrees(repo_path: &Path) -> Result<()> {
             "git worktree prune failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn cleanup_worktree_dir(worktree_dir: &Path) -> Result<()> {
+    if !worktree_dir.exists() {
+        return Ok(());
+    }
+    info!(
+        "Cleaning up stale worktree directories in {:?}",
+        worktree_dir
+    );
+    let mut entries = tokio::fs::read_dir(worktree_dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.is_dir() {
+            let is_sashiko = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|name| name.starts_with("sashiko-worktree-"))
+                .unwrap_or(false);
+            if is_sashiko {
+                info!("Deleting stale worktree directory: {:?}", path);
+                if let Err(e) = tokio::fs::remove_dir_all(&path).await {
+                    error!("Failed to delete stale worktree dir {:?}: {}", path, e);
+                }
+            }
+        }
     }
     Ok(())
 }
