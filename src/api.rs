@@ -18,8 +18,10 @@ use crate::fetcher::FetchRequest;
 use crate::settings::ServerSettings;
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, Query, State},
+    extract::{ConnectInfo, Query, Request, State},
     http::StatusCode,
+    middleware::{self, Next},
+    response::{IntoResponse, Redirect},
     routing::{get, get_service, post},
 };
 use serde::{Deserialize, Serialize};
@@ -233,6 +235,22 @@ pub struct SubmitResponse {
     pub id: String,
 }
 
+async fn redirect_www(req: Request, next: Next) -> impl IntoResponse {
+    if let Some(host) = req.headers().get("host").and_then(|h| h.to_str().ok()) {
+        let host_without_port = host.split(':').next().unwrap_or("");
+        if host_without_port == "www.sashiko.dev" {
+            let uri = req.uri();
+            let new_uri = format!(
+                "https://sashiko.dev{}{}",
+                uri.path(),
+                uri.query().map(|q| format!("?{}", q)).unwrap_or_default()
+            );
+            return Redirect::permanent(&new_uri).into_response();
+        }
+    }
+    next.run(req).await
+}
+
 /// Build the API router with all routes and shared state.
 ///
 /// Extracted from [`run_server`] so that integration tests can construct the
@@ -282,6 +300,7 @@ pub fn build_router(
         .route("/api/patch/rerun", post(rerun_patch))
         .route("/", get_service(ServeFile::new("static/index.html")))
         .nest_service("/static", ServeDir::new("static"))
+        .layer(middleware::from_fn(redirect_www))
         .with_state(state)
 }
 

@@ -441,3 +441,53 @@ async fn test_stats_tools_endpoint() {
     assert_eq!(tools[0]["count"], 5);
     assert_eq!(tools[0]["avg_output_length"], 200.0);
 }
+
+// ── Redirect Tests ───────────────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn test_redirect_www_to_non_www() {
+    let server = spawn_test_server(false).await;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let resp = client
+        .get(&server.base_url)
+        .header("Host", "www.sashiko.dev")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 308);
+    assert_eq!(
+        resp.headers().get("Location").unwrap().to_str().unwrap(),
+        "https://sashiko.dev/"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_redirect_www_to_non_www_with_path_and_query() {
+    let server = spawn_test_server(false).await;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let resp = client
+        .get(format!("{}/api/stats?foo=bar", server.base_url))
+        .header("Host", "www.sashiko.dev")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 308);
+    assert_eq!(
+        resp.headers().get("Location").unwrap().to_str().unwrap(),
+        "https://sashiko.dev/api/stats?foo=bar"
+    );
+}
