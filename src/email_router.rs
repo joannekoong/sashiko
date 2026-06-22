@@ -1,4 +1,6 @@
-use crate::email_policy::EmailPolicyConfig;
+use crate::db::Severity;
+use crate::email_policy::{EmailPolicyConfig, PatchworkPolicy};
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 pub enum Action {
@@ -13,11 +15,40 @@ pub enum Action {
 pub struct EmailRouter {}
 
 impl EmailRouter {
+    /// Helper to merge two optional severities, returning the lowest (most inclusive).
+    /// None represents "all severities" (lowest possible).
+    fn merge_severity_opt(a: &Option<String>, b: &Option<String>) -> Option<String> {
+        match (a, b) {
+            (Some(sa), Some(sb)) => {
+                let sev_a = Severity::from_str(sa);
+                let sev_b = Severity::from_str(sb);
+                let min_sev = std::cmp::min(sev_a, sev_b);
+                Some(format!("{:?}", min_sev))
+            }
+            _ => None, // If either is None (all findings), the merged result is None
+        }
+    }
+
+    /// Merge the configuration of policy `b` into `a`.
+    /// Preserves the first non-empty token.
+    fn merge_policies(a: &mut PatchworkPolicy, b: &PatchworkPolicy) {
+        a.min_severity = Self::merge_severity_opt(&a.min_severity, &b.min_severity);
+
+        let sev_a = Severity::from_str(&a.fail_severity);
+        let sev_b = Severity::from_str(&b.fail_severity);
+        let min_fail = std::cmp::min(sev_a, sev_b);
+        a.fail_severity = format!("{:?}", min_fail);
+
+        if a.token.is_none() && b.token.is_some() {
+            a.token = b.token.clone();
+        }
+    }
+
     pub fn resolve_patchwork(
         policy: &EmailPolicyConfig,
         incoming_to: &[String],
         incoming_cc: &[String],
-    ) -> Vec<crate::email_policy::PatchworkPolicy> {
+    ) -> Vec<PatchworkPolicy> {
         let mut all_incoming: Vec<&String> = Vec::new();
         for addr in incoming_to {
             all_incoming.push(addr);
@@ -46,7 +77,50 @@ impl EmailRouter {
             matched_policies.push(policy.defaults.patchwork.clone());
         }
 
-        matched_policies.into_iter().filter(|p| p.enabled).collect()
+        // Filter only enabled policies
+        let enabled_policies: Vec<PatchworkPolicy> =
+            matched_policies.into_iter().filter(|p| p.enabled).collect();
+
+        let mut api_targets: HashMap<String, PatchworkPolicy> = HashMap::new();
+        let mut email_targets: HashMap<String, PatchworkPolicy> = HashMap::new();
+
+        for p in enabled_policies {
+            // 1. Process API target if present
+            if let Some(ref api_url) = p.api_url {
+                let mut api_only_policy = p.clone();
+                api_only_policy.email = None; // Strip email for API-only delivery
+
+                if let Some(existing) = api_targets.get_mut(api_url) {
+                    Self::merge_policies(existing, &api_only_policy);
+                } else {
+                    api_targets.insert(api_url.clone(), api_only_policy);
+                }
+            }
+
+            // 2. Process Email target if present
+            if let Some(ref email_addr) = p.email {
+                let mut email_only_policy = p.clone();
+                email_only_policy.api_url = None; // Strip API for Email-only delivery
+                email_only_policy.token = None;
+
+                if let Some(existing) = email_targets.get_mut(email_addr) {
+                    Self::merge_policies(existing, &email_only_policy);
+                } else {
+                    email_targets.insert(email_addr.clone(), email_only_policy);
+                }
+            }
+        }
+
+        // Combine both merged target lists
+        let mut final_policies = Vec::new();
+        for p in api_targets.into_values() {
+            final_policies.push(p);
+        }
+        for p in email_targets.into_values() {
+            final_policies.push(p);
+        }
+
+        final_policies
     }
 
     pub fn resolve_recipients(
@@ -457,5 +531,123 @@ mod tests {
             }
             _ => panic!("Expected Send"),
         }
+    }
+
+    #[test]
+    fn test_resolve_patchwork_deduplication_and_merging() {
+        let mut subsystems = HashMap::new();
+
+        // Subsystem 1: mm - API and Email. Strict fail_severity (High), lenient min_severity (Medium)
+        subsystems.insert(
+            "mm".to_string(),
+            SubsystemPolicy {
+                lists: vec!["linux-mm@kvack.org".to_string()],
+                patchwork: PatchworkPolicy {
+                    enabled: true,
+                    api_url: Some("https://patchwork.kernel.org/api".to_string()),
+                    token: Some("token_mm".to_string()),
+                    email: Some("notify@kernel.org".to_string()),
+                    min_severity: Some("Medium".to_string()),
+                    fail_severity: "High".to_string(),
+                },
+                ..Default::default()
+            },
+        );
+
+        // Subsystem 2: bpf - API only. Lenient fail_severity (Critical), strict min_severity (High)
+        subsystems.insert(
+            "bpf".to_string(),
+            SubsystemPolicy {
+                lists: vec!["bpf@vger.kernel.org".to_string()],
+                patchwork: PatchworkPolicy {
+                    enabled: true,
+                    api_url: Some("https://patchwork.kernel.org/api".to_string()),
+                    token: Some("token_bpf".to_string()),
+                    email: None,
+                    min_severity: Some("High".to_string()),
+                    fail_severity: "Critical".to_string(),
+                },
+                ..Default::default()
+            },
+        );
+
+        // Subsystem 3: net - Email only. Overlaps email with mm, but has min_severity = None (all / Low)
+        subsystems.insert(
+            "net".to_string(),
+            SubsystemPolicy {
+                lists: vec!["netdev@vger.kernel.org".to_string()],
+                patchwork: PatchworkPolicy {
+                    enabled: true,
+                    api_url: None,
+                    token: None,
+                    email: Some("notify@kernel.org".to_string()),
+                    min_severity: None, // most inclusive
+                    fail_severity: "High".to_string(),
+                },
+                ..Default::default()
+            },
+        );
+
+        let policy = EmailPolicyConfig {
+            defaults: SubsystemPolicy {
+                lists: vec![],
+                patchwork: PatchworkPolicy {
+                    enabled: false,
+                    api_url: None,
+                    token: None,
+                    email: None,
+                    min_severity: None,
+                    fail_severity: "High".to_string(),
+                },
+                ..Default::default()
+            },
+            subsystems,
+        };
+
+        // Resolve patchwork for a patch sent to mm, bpf, and net
+        let results = EmailRouter::resolve_patchwork(
+            &policy,
+            &[
+                "linux-mm@kvack.org".to_string(),
+                "bpf@vger.kernel.org".to_string(),
+                "netdev@vger.kernel.org".to_string(),
+            ],
+            &[],
+        );
+
+        // We expect exactly 2 resolved policies:
+        // 1. One API policy for "https://patchwork.kernel.org/api" (merged from mm and bpf)
+        // 2. One Email policy for "notify@kernel.org" (merged from mm and net)
+        assert_eq!(results.len(), 2);
+
+        let api_policy = results
+            .iter()
+            .find(|p| p.api_url.is_some())
+            .expect("Expected an API policy");
+        let email_policy = results
+            .iter()
+            .find(|p| p.email.is_some())
+            .expect("Expected an Email policy");
+
+        // Verify API policy details:
+        assert_eq!(
+            api_policy.api_url.as_deref(),
+            Some("https://patchwork.kernel.org/api")
+        );
+        assert_eq!(api_policy.email, None); // Split to API-only
+        // min_severity: min(Medium, High) -> Medium
+        assert_eq!(api_policy.min_severity.as_deref(), Some("Medium"));
+        // fail_severity: min(High, Critical) -> High
+        assert_eq!(api_policy.fail_severity, "High");
+        // token: should pick first non-empty (token_mm or token_bpf)
+        assert!(api_policy.token.is_some());
+
+        // Verify Email policy details:
+        assert_eq!(email_policy.email.as_deref(), Some("notify@kernel.org"));
+        assert_eq!(email_policy.api_url, None); // Split to Email-only
+        // min_severity: min(Medium, None) -> None (most inclusive)
+        assert_eq!(email_policy.min_severity, None);
+        // fail_severity: min(High, High) -> High
+        assert_eq!(email_policy.fail_severity, "High");
     }
 }
