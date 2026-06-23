@@ -14,6 +14,22 @@ patches:
       - op: replace
         path: /spec/template/spec/containers/0/image
         value: us-docker.pkg.dev/gcp-project-xxxxx/sashiko-repository/sashiko:next
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: SASHIKO__SMTP__PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: sashiko-secrets
+              key: SASHIKO_SMTP__PASSWORD
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: SASHIKO_PATCHWORK_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: sashiko-secrets
+              key: SASHIKO_PATCHWORK_TOKEN
 
   # 2. ServiceAccount: Link to real GCP Service Account
   - target:
