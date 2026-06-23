@@ -66,6 +66,15 @@ lists = ["netdev@vger.kernel.org"]
 embargo_hours = 24
 subject_prefixes = ["net", "net-next"]
 
+[subsystems.mptcp]
+lists = ["mptcp@lists.linux.dev"]
+mute_all = true
+subject_prefixes = ["mptcp", "mptcp-next"]
+
+[subsystems.mptcp.patchwork]
+enabled = true
+api_url = "https://patchwork.kernel.org/api/1.3"
+
 [subsystems.cgroups]
 lists = ["cgroups@vger.kernel.org"]
 reply_to_author = true
