@@ -355,6 +355,31 @@ pub async fn prune_worktrees(repo_path: &Path) -> Result<()> {
 }
 
 #[allow(dead_code)]
+pub async fn ensure_submodule_config_compat(repo_path: &Path) -> Result<()> {
+    info!("Ensuring submodule config compatibility in {:?}", repo_path);
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["-c", "safe.bareRepository=all"])
+        .args(["config", "--unset", "core.worktree"])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let status_code = output.status.code().unwrap_or(-1);
+        if status_code != 5 {
+            return Err(anyhow!(
+                "git config --unset core.worktree failed with exit code {}: {}",
+                status_code,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    } else {
+        info!("Successfully unset core.worktree in {:?}", repo_path);
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
 pub async fn cleanup_worktree_dir(worktree_dir: &Path) -> Result<()> {
     if !worktree_dir.exists() {
         return Ok(());

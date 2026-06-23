@@ -560,6 +560,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         error!("Failed to prune stale worktrees: {}", e);
     }
 
+    // Ensure submodule config compatibility (unset core.worktree if set)
+    if let Err(e) = sashiko::git_ops::ensure_submodule_config_compat(&repo_path).await {
+        error!("Failed to ensure submodule config compatibility: {}", e);
+    }
+
     if let Some(custom_remotes) = &settings.git.custom_remotes {
         for remote in custom_remotes {
             info!(
