@@ -445,7 +445,6 @@ pub async fn ensure_remote(
         ));
     }
 
-    // 2. Security Check (Skipped - trusting MAINTAINERS)
     // acquire remote-specific lock
     let lock = get_remote_lock(name);
     let _guard = lock.lock().await;
@@ -463,7 +462,29 @@ pub async fn ensure_remote(
             .output()
             .await?;
 
-        if !check.status.success() {
+        if check.status.success() {
+            // Check if URL matches, if not update it
+            let current_url = String::from_utf8_lossy(&check.stdout).trim().to_string();
+            if current_url != url {
+                info!(
+                    "Updating remote URL for {} from {} to {}",
+                    name,
+                    redact_secret(&current_url),
+                    redact_secret(url)
+                );
+                let update = Command::new("git")
+                    .current_dir(repo_path)
+                    .args(["remote", "set-url", name, url])
+                    .output()
+                    .await?;
+                if !update.status.success() {
+                    return Err(anyhow!(
+                        "Failed to update remote URL: {}",
+                        String::from_utf8_lossy(&update.stderr)
+                    ));
+                }
+            }
+        } else {
             info!("Adding remote {} ({})", name, redact_secret(url));
             let add = Command::new("git")
                 .current_dir(repo_path)
@@ -526,54 +547,100 @@ pub async fn ensure_remote(
         return Ok(());
     }
 
+    let mut fetch_ok = false;
+    let mut error_msg = String::new();
+
     // 4. Fetch
     if should_fetch {
         info!("Fetching remote {}", name);
-        let mut fetch = Command::new("git")
+
+        let fetch_future = Command::new("git")
             .current_dir(repo_path)
             .args(GIT_PROTOCOL_RESTRICTIONS)
             .args(["fetch", "--prune", "--no-tags", name])
-            .output()
-            .await?;
+            .output();
 
-        if !fetch.status.success() {
-            let stderr = String::from_utf8_lossy(&fetch.stderr);
+        // Dynamically scale timeout: 30 minutes for heavy initial fetches, 5 minutes for routine updates
+        let timeout_duration = if just_added || !head_exists {
+            std::time::Duration::from_secs(1800)
+        } else {
+            std::time::Duration::from_secs(300)
+        };
 
-            // Auto-recover from bad tags
-            if stderr.contains("fatal: bad object refs/tags/")
-                && let Some(start) = stderr.find("refs/tags/")
-            {
-                let tag_path = &stderr[start..];
-                let tag_path = tag_path.split_whitespace().next().unwrap_or("");
-                if !tag_path.is_empty() {
-                    warn!(
-                        "Detected bad tag '{}'. Attempting to delete and retry fetch.",
-                        tag_path
-                    );
-                    let _ = Command::new("git")
-                        .current_dir(repo_path)
-                        .args(["update-ref", "-d", tag_path])
-                        .output()
-                        .await;
+        match tokio::time::timeout(timeout_duration, fetch_future).await {
+            Ok(Ok(mut fetch)) => {
+                if !fetch.status.success() {
+                    let stderr = String::from_utf8_lossy(&fetch.stderr);
 
-                    // Retry the fetch once
-                    fetch = Command::new("git")
-                        .current_dir(repo_path)
-                        .args(GIT_PROTOCOL_RESTRICTIONS)
-                        .args(["fetch", "--prune", "--no-tags", name])
-                        .output()
-                        .await?;
+                    // Auto-recover from bad tags
+                    if stderr.contains("fatal: bad object refs/tags/")
+                        && let Some(start) = stderr.find("refs/tags/")
+                    {
+                        let tag_path = &stderr[start..];
+                        let tag_path = tag_path.split_whitespace().next().unwrap_or("");
+                        if !tag_path.is_empty() {
+                            warn!(
+                                "Detected bad tag '{}'. Attempting to delete and retry fetch.",
+                                tag_path
+                            );
+                            let _ = Command::new("git")
+                                .current_dir(repo_path)
+                                .args(["update-ref", "-d", tag_path])
+                                .output()
+                                .await;
+
+                            // Retry the fetch once
+                            let retry_future = Command::new("git")
+                                .current_dir(repo_path)
+                                .args(GIT_PROTOCOL_RESTRICTIONS)
+                                .args(["fetch", "--prune", "--no-tags", name])
+                                .output();
+
+                            if let Ok(Ok(retry_fetch)) =
+                                tokio::time::timeout(timeout_duration, retry_future).await
+                            {
+                                fetch = retry_fetch;
+                            }
+                        }
+                    }
                 }
+
+                if fetch.status.success() {
+                    fetch_ok = true;
+                } else {
+                    error_msg = format!(
+                        "Failed to fetch remote {}: {}",
+                        name,
+                        String::from_utf8_lossy(&fetch.stderr).trim()
+                    );
+                }
+            }
+            Ok(Err(e)) => {
+                error_msg = format!("Failed to execute git fetch for {}: {}", name, e);
+            }
+            Err(_) => {
+                error_msg = format!("Git fetch for {} timed out after 60 seconds", name);
             }
         }
 
-        if !fetch.status.success() {
-            warn!(
-                "Failed to fetch remote {}: {}",
-                name,
-                String::from_utf8_lossy(&fetch.stderr)
-            );
-            // We continue even if fetch fails, attempting set-head might still work or fail later
+        if !fetch_ok {
+            let max_stale_age = std::time::Duration::from_secs(86400); // 24 hours
+            let can_fallback = head_exists
+                && match age {
+                    Some(a) => a < max_stale_age,
+                    None => false,
+                };
+
+            if can_fallback {
+                warn!(
+                    "Fetch failed for {} ({}), but local ref exists and is fresh enough (age: {:?}). Falling back to local ref.",
+                    name, error_msg, age
+                );
+                // We do NOT update the timestamp file, so we will try to fetch again next time.
+            } else {
+                error!("{}", error_msg);
+                return Err(anyhow::anyhow!(error_msg));
+            }
         } else {
             // Update timestamp only on success
             if let Ok(file) = std::fs::File::create(&timestamp_file) {
@@ -582,8 +649,8 @@ pub async fn ensure_remote(
         }
     }
 
-    // Ensure HEAD is set correctly (if we fetched OR if it was missing)
-    if should_fetch || !head_exists {
+    // Ensure HEAD is set correctly (if we fetched successfully)
+    if should_fetch && fetch_ok {
         // Requires global config lock
         let global_lock = get_global_config_lock();
         let _global_guard = global_lock.lock().await;

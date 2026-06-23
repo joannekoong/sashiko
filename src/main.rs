@@ -575,6 +575,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Start Git Sync Worker
+    {
+        let sync_worker = sashiko::worker::sync::GitSyncWorker::new(repo_path.clone());
+        tokio::spawn(async move {
+            sync_worker.run().await;
+        });
+    }
+
     // Start Reviewer Service
     let reviewer = Reviewer::new(db.clone(), settings.clone()).await;
     tokio::spawn(async move {

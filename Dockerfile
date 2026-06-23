@@ -33,6 +33,10 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Configure Git to rewrite git:// to https:// to bypass firewalls in production
+RUN git config --global url."https://".insteadOf "git://"
+
+
 WORKDIR /app
 
 # Copy binaries from builder

@@ -16,6 +16,7 @@ pub mod email;
 pub mod patchwork;
 pub mod prefetch;
 pub mod prompts;
+pub mod sync;
 pub mod tools;
 #[cfg(test)]
 mod tools_test;
