@@ -13,13 +13,12 @@
 // limitations under the License.
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use clap::Parser;
 use futures::stream::StreamExt;
 use regex::Regex;
 use reqwest::Client;
-use sashiko::ai::{
-    AiErrorClass, AiMessage, AiProvider, AiRequest, AiRole, classify_ai_error, create_provider,
-};
+use sashiko::ai::{AiProvider, LlmSession, SessionRunner, ValidationError, create_provider};
 use sashiko::db::Database;
 use sashiko::settings::Settings;
 use serde::{Deserialize, Serialize};
@@ -541,70 +540,29 @@ async fn process_entry(
 
     info!("Evaluating commit {}...", entry.commit);
 
-    let r = loop {
-        let req = AiRequest {
-            system: None,
-            messages: vec![AiMessage {
-                role: AiRole::User,
-                content: Some(prompt.clone()),
-                thought: None,
-                thought_signature: None,
-                tool_calls: None,
-                tool_call_id: None,
-            }],
-            tools: None,
-            temperature: None,
-            response_format: None,
-            context_tag: None,
-        };
+    let mut session = BenchmarkEvalSession::new(prompt.clone());
+    let runner = SessionRunner::new(client.as_ref());
+    let run_res = runner.run(&mut session).await;
 
-        match client.generate_content(req).await {
-            Ok(r) => break r,
-            Err(e) => match classify_ai_error(&e) {
-                AiErrorClass::RateLimit { retry_after }
-                | AiErrorClass::Transient { retry_after } => {
-                    warn!(
-                        "API error ({}), pausing for {:?} before retry...",
-                        e, retry_after
-                    );
-                    tokio::time::sleep(retry_after).await;
-                }
-                AiErrorClass::Fatal => {
-                    return BenchmarkResult {
-                        commit: entry.commit,
-                        problem_description,
-                        found: false,
-                        status: "UNKNOWN".to_string(),
-                        explanation: format!("Evaluation failed: {}", e),
-                        findings_count,
-                        concerns_count,
-                        tokens_in,
-                        tokens_out,
-                        turns,
-                        duration_secs,
-                    };
-                }
-            },
+    let (status, explanation) = match run_res {
+        Ok(result) => {
+            let text = result.output;
+            let re_status = Regex::new(r"(?i)\b(DETECTED|PARTIALLY_DETECTED|MISSED)\b").unwrap();
+            let (status_raw, expl_raw) = if let Some(cap) = re_status.captures(&text) {
+                let s = cap[1].to_uppercase();
+                let remaining = re_status.replace(&text, "").to_string();
+                (s, remaining)
+            } else {
+                ("UNKNOWN".to_string(), text.clone())
+            };
+
+            let expl = expl_raw
+                .trim()
+                .trim_start_matches([':', '-', ' ', '\n'])
+                .to_string();
+            (status_raw, expl)
         }
-    };
-
-    let (status, explanation) = {
-        let text = r.content.unwrap_or_else(|| "Unknown".to_string());
-
-        let re_status = Regex::new(r"(?i)\b(DETECTED|PARTIALLY_DETECTED|MISSED)\b").unwrap();
-        let (status_raw, expl_raw) = if let Some(cap) = re_status.captures(&text) {
-            let s = cap[1].to_uppercase();
-            let remaining = re_status.replace(&text, "").to_string();
-            (s, remaining)
-        } else {
-            ("UNKNOWN".to_string(), text.clone())
-        };
-
-        let expl = expl_raw
-            .trim()
-            .trim_start_matches([':', '-', ' ', '\n'])
-            .to_string();
-        (status_raw, expl)
+        Err(e) => ("UNKNOWN".to_string(), format!("Evaluation failed: {}", e)),
     };
 
     let found = status == "DETECTED" || status == "PARTIALLY_DETECTED";
@@ -622,5 +580,64 @@ async fn process_entry(
         tokens_out,
         turns,
         duration_secs,
+    }
+}
+
+struct BenchmarkEvalSession {
+    prompt: String,
+}
+
+impl BenchmarkEvalSession {
+    fn new(prompt: String) -> Self {
+        Self { prompt }
+    }
+}
+
+#[async_trait]
+impl LlmSession for BenchmarkEvalSession {
+    type Output = String;
+
+    fn system_prompt(&self) -> String {
+        "".to_string()
+    }
+
+    fn initial_user_prompt(&self) -> String {
+        self.prompt.clone()
+    }
+
+    fn tools(&self) -> Option<Vec<sashiko::ai::AiTool>> {
+        None
+    }
+
+    fn temperature(&self) -> Option<f32> {
+        None
+    }
+
+    fn context_tag(&self) -> Option<String> {
+        None
+    }
+
+    async fn call_tool(
+        &mut self,
+        _name: &str,
+        _args: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        anyhow::bail!("BenchmarkEvalSession doesn't use tools")
+    }
+
+    fn validate(
+        &mut self,
+        response: &sashiko::ai::AiResponse,
+    ) -> Result<Self::Output, ValidationError> {
+        let text = response.content.as_deref().unwrap_or("").to_string();
+        Ok(text)
+    }
+
+    fn handle_provider_error(
+        &mut self,
+        _error: &anyhow::Error,
+        _attempt: usize,
+    ) -> sashiko::ai::ErrorAction {
+        sashiko::ai::ErrorAction::Fail
     }
 }
