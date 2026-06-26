@@ -23,7 +23,6 @@ pub mod events;
 pub mod fetcher;
 pub mod git_ops;
 pub mod ingestor;
-pub mod inspector;
 pub mod nntp;
 pub mod patch;
 pub mod patchwork;

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use sashiko::db::Database;
 use sashiko::events::{Event, ParsedArticle};
 use sashiko::ingestor::Ingestor;
@@ -58,16 +58,6 @@ struct Cli {
     /// Debug feature: select which stages from 1-7 to run
     #[arg(long, hide = true, value_delimiter = ',')]
     stages: Option<Vec<u8>>,
-
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
-
-#[derive(Subcommand, Debug)]
-enum Commands {
-    Inspect,
-    /// Restart failed reviews
-    RestartFailed,
 }
 
 const PARSER_VERSION: i32 = 2;
@@ -156,18 +146,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize Database
     let db = Arc::new(Database::new(&settings.database).await?);
     db.migrate().await?;
-
-    if let Some(Commands::Inspect) = cli.command {
-        return sashiko::inspector::run_inspection(db)
-            .await
-            .map_err(|e| e.into());
-    }
-
-    if let Some(Commands::RestartFailed) = cli.command {
-        let count = db.restart_failed_reviews().await?;
-        println!("Successfully restarted {} failed reviews.", count);
-        return Ok(());
-    }
 
     // Create internal task queues
     // raw_tx -> Parser -> parsed_tx -> DB Worker
