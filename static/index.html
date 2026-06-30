@@ -1205,6 +1205,27 @@
         };
 
         // =====================================================================
+        // SAFE STORAGE HACKS
+        // =====================================================================
+        const safeStorage = {
+            getItem(key) {
+                try {
+                    return localStorage.getItem(key);
+                } catch (e) {
+                    console.warn("localStorage is not available:", e);
+                    return null;
+                }
+            },
+            setItem(key, value) {
+                try {
+                    localStorage.setItem(key, value);
+                } catch (e) {
+                    console.warn("localStorage is not available:", e);
+                }
+            }
+        };
+
+        // =====================================================================
         // SETTINGS & LOCAL STORAGE
         // =====================================================================
         function applySettings() {
@@ -1228,20 +1249,20 @@
 
         function setTheme(val) {
             state.settings.theme = val;
-            localStorage.setItem('sashiko_theme', val);
+            safeStorage.setItem('sashiko_theme', val);
             applySettings();
         }
 
         function setColorblind(val) {
             state.settings.colorblind = !!val;
-            localStorage.setItem('sashiko_colorblind', state.settings.colorblind ? '1' : '0');
+            safeStorage.setItem('sashiko_colorblind', state.settings.colorblind ? '1' : '0');
             applySettings();
         }
 
         function loadSettings() {
-            const theme = localStorage.getItem('sashiko_theme');
+            const theme = safeStorage.getItem('sashiko_theme');
             if (theme) state.settings.theme = theme;
-            const cb = localStorage.getItem('sashiko_colorblind');
+            const cb = safeStorage.getItem('sashiko_colorblind');
             if (cb) state.settings.colorblind = cb === '1';
             applySettings();
         }
