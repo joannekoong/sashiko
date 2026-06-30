@@ -118,17 +118,62 @@
         }
 
         /* Colorblind Mode Overrides (Okabe-Ito inspired palette) */
-        body.colorblind-mode, body.colorblind-mode.theme-light, body.colorblind-mode.theme-dark {
-            --status-pending: #56B4E9;   /* Sky Blue */
-            --status-inreview: #E69F00;  /* Orange */
-            --status-reviewed: #0072B2;  /* Blue */
-            --status-failed: #D55E00;    /* Vermilion */
-            --status-embargoed: #CC79A7; /* Reddish Purple */
+        /* Base / Light Theme: Uses darkened colors for contrast on light backgrounds */
+        body.colorblind-mode {
+            --status-pending: #336C8B;   /* Dark Sky Blue */
+            --status-inreview: #8A5F00;  /* Dark Orange */
+            --status-reviewed: #004D73;  /* Dark Blue */
+            --status-failed: #803800;    /* Dark Vermilion */
+            --status-embargoed: #7A4864; /* Dark Reddish Purple */
 
-            --sev-critical: #D55E00;     /* Vermilion */
-            --sev-high: #E69F00;         /* Orange */
-            --sev-medium: #F0E442;       /* Yellow */
-            --sev-low: #56B4E9;          /* Sky Blue */
+            --sev-critical: #803800;     /* Dark Vermilion */
+            --sev-high: #8A5F00;         /* Dark Orange */
+            --sev-medium: #787221;       /* Dark Yellow/Olive */
+            --sev-low: #336C8B;          /* Dark Sky Blue */
+        }
+
+        /* Dark Theme (System Preference): Uses standard Okabe-Ito colors */
+        @media (prefers-color-scheme: dark) {
+            body.colorblind-mode {
+                --status-pending: #56B4E9;   /* Sky Blue */
+                --status-inreview: #E69F00;  /* Orange */
+                --status-reviewed: #0072B2;  /* Blue */
+                --status-failed: #D55E00;    /* Vermilion */
+                --status-embargoed: #CC79A7; /* Reddish Purple */
+
+                --sev-critical: #D55E00;     /* Vermilion */
+                --sev-high: #E69F00;         /* Orange */
+                --sev-medium: #F0E442;       /* Yellow */
+                --sev-low: #56B4E9;          /* Sky Blue */
+            }
+        }
+
+        /* Explicit Light Theme: Overrides system dark preference */
+        body.colorblind-mode.theme-light {
+            --status-pending: #336C8B;
+            --status-inreview: #8A5F00;
+            --status-reviewed: #004D73;
+            --status-failed: #803800;
+            --status-embargoed: #7A4864;
+
+            --sev-critical: #803800;
+            --sev-high: #8A5F00;
+            --sev-medium: #787221;
+            --sev-low: #336C8B;
+        }
+
+        /* Explicit Dark Theme: Overrides system light preference */
+        body.colorblind-mode.theme-dark {
+            --status-pending: #56B4E9;
+            --status-inreview: #E69F00;
+            --status-reviewed: #0072B2;
+            --status-failed: #D55E00;
+            --status-embargoed: #CC79A7;
+
+            --sev-critical: #D55E00;
+            --sev-high: #E69F00;
+            --sev-medium: #F0E442;
+            --sev-low: #56B4E9;
         }
 
         /* Explicit Theme Overrides */
