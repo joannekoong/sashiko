@@ -1179,7 +1179,7 @@
             <span class="modal-close" onclick="closeAbout()">&times;</span>
             <div class="about-logo">
                 <img src="static/logo.png" style="height: 1.5em; margin-right: 12px;" alt="Sashiko Logo">
-                About Sashiko
+                About <span id="about-modal-project-name">Sashiko</span>
             </div>
             <div class="about-text" id="about-text-content">
                 <blockquote>
@@ -1387,13 +1387,15 @@
                 if (res.ok) {
                     config = await res.json();
                     document.title = config.project_name;
-                    document.getElementById('about-text-content').innerHTML = `
-                        <p>${escapeHtml(config.project_description)}</p>
-                    `;
-                    const els = document.querySelectorAll('.header-title, .about-logo');
-                    els.forEach(el => {
-                        el.innerHTML = `<img src="static/logo.png" style="height: 1.5em; margin-right: 12px;" alt="Logo"> ${escapeHtml(config.project_name)}`;
-                    });
+                    if (config.project_description && config.project_description.trim() !== "") {
+                        document.getElementById('about-text-content').innerHTML = `
+                            <p>${escapeHtml(config.project_description)}</p>
+                        `;
+                    }
+                    const aboutNameEl = document.getElementById('about-modal-project-name');
+                    if (aboutNameEl) {
+                        aboutNameEl.textContent = config.project_name;
+                    }
                 }
             } catch(e) { console.error("Failed to load config", e); }
         }
@@ -1858,7 +1860,7 @@
                 <h1>
                     <span style="display:flex; align-items:center; cursor:pointer;" onclick="openAbout()">
                         <img src="static/logo.png" style="height: 1.2em; margin-right: 12px;">
-                        Sashiko
+                        ${escapeHtml(config.project_name || 'Sashiko')}
                     </span>
                 </h1>
                 <div class="controls">
@@ -2033,7 +2035,7 @@
                 document.getElementById('stats').outerHTML = `
                     <div class="stats-container" id="stats">
                         <div class="stats-group">
-                            <span class="stats-label">Sashiko</span> v${data.version}
+                            <span class="stats-label">${escapeHtml(config.project_name || 'Sashiko')}</span> v${data.version}
                             <span class="stats-sep"></span>
                             <a href="#" onclick="event.preventDefault(); openAbout();" style="font-weight:500;">About</a>
                             <span class="stats-sep"></span>
@@ -2746,7 +2748,7 @@
             if (!res.ok) throw new Error('Message not found');
             const data = await res.json();
 
-            document.title = `Sashiko - ${data.subject}`;
+            document.title = `${config.project_name || 'Sashiko'} - ${data.subject}`;
             const date = formatDate(data.date, true);
             
             // Heuristic: message_id is SHA or synthetic local ID means it's a direct git submission
