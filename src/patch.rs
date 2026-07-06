@@ -117,7 +117,7 @@ pub fn parse_email(raw_email: &[u8]) -> Result<(PatchsetMetadata, Option<Patch>)
             if name.is_empty() || name.to_lowercase() == "unknown" {
                 addr.to_string()
             } else {
-                format!("{} <{}>", name, addr)
+                format!("\"{}\" <{}>", name.replace('"', "\\\""), addr)
             }
         })
         .unwrap_or_else(|| "unknown@localhost".to_string());
@@ -134,7 +134,7 @@ pub fn parse_email(raw_email: &[u8]) -> Result<(PatchsetMetadata, Option<Patch>)
                 author = if name.is_empty() || name.to_lowercase() == "unknown" {
                     address.to_string()
                 } else {
-                    format!("{} <{}>", name, address)
+                    format!("\"{}\" <{}>", name.replace('"', "\\\""), address)
                 };
             } else if author_email.to_lowercase().starts_with("devnull+") {
                 tracing::warn!(
@@ -562,7 +562,7 @@ Body";
         let raw =
             b"Message-ID: <123>\r\nFrom: Test User <test@example.com>\r\nSubject: Test\r\n\r\nBody";
         let (meta, _) = parse_email(raw).unwrap();
-        assert_eq!(meta.author, "Test User <test@example.com>");
+        assert_eq!(meta.author, "\"Test User\" <test@example.com>");
 
         let raw_no_name =
             b"Message-ID: <456>\r\nFrom: test2@example.com\r\nSubject: Test\r\n\r\nBody";
@@ -572,7 +572,7 @@ Body";
         let raw_malformed =
             b"Message-ID: <789>\r\nFrom: \"fqr\" <user.email>\r\nSubject: Test\r\n\r\nBody";
         let (meta3, _) = parse_email(raw_malformed).unwrap();
-        assert_eq!(meta3.author, "fqr <unknown@localhost>");
+        assert_eq!(meta3.author, "\"fqr\" <unknown@localhost>");
     }
 
     #[test]
@@ -582,7 +582,7 @@ Body";
                     X-Original-From: Real Author <author@example.com>\r\n\
                     Subject: Test B4 Relay\r\n\r\nBody";
         let (meta, _) = parse_email(raw).unwrap();
-        assert_eq!(meta.author, "Real Author <author@example.com>");
+        assert_eq!(meta.author, "\"Real Author\" <author@example.com>");
     }
 
     #[test]
@@ -596,7 +596,7 @@ Body";
         let (meta_mismatch, _) = parse_email(raw_mismatch).unwrap();
         assert_eq!(
             meta_mismatch.author,
-            "Real Author via B4 Relay <devnull+author.example.com@kernel.org>"
+            "\"Real Author via B4 Relay\" <devnull+author.example.com@kernel.org>"
         );
     }
 
@@ -813,5 +813,15 @@ Body";
             vec!["bpf", "net-next"]
         ); // sorted
         assert_eq!(get_subject_prefixes("[PATCH]"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_parse_email_author_quoting() {
+        let raw = b"From: Thomas Richard (TI) <thomas.richard@bootlin.com>\r\nMessage-ID: <123>\r\nSubject: Test\r\n\r\nDiff:\n--- a\n+++ b\n@@ -1 +1 @@";
+        let (meta, _) = parse_email(raw).unwrap();
+        assert_eq!(
+            meta.author,
+            "\"Thomas Richard (TI)\" <thomas.richard@bootlin.com>"
+        );
     }
 }

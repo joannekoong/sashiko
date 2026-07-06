@@ -83,7 +83,7 @@ impl EmailWorker {
 
         let to_addresses: Vec<String> = serde_json::from_str(&email_row.to_addresses)?;
         for to in to_addresses {
-            match to.parse() {
+            match parse_lenient(&to) {
                 Ok(addr) => builder = builder.to(addr),
                 Err(e) => warn!("Failed to parse 'to' address '{}': {}", to, e),
             }
@@ -91,7 +91,7 @@ impl EmailWorker {
 
         let cc_addresses: Vec<String> = serde_json::from_str(&email_row.cc_addresses)?;
         for cc in cc_addresses {
-            match cc.parse() {
+            match parse_lenient(&cc) {
                 Ok(addr) => builder = builder.cc(addr),
                 Err(e) => warn!("Failed to parse 'cc' address '{}': {}", cc, e),
             }
@@ -131,5 +131,60 @@ impl EmailWorker {
         mailer.send(msg).await?;
 
         Ok(())
+    }
+}
+
+fn parse_lenient(s: &str) -> anyhow::Result<lettre::message::Mailbox> {
+    if let Some(start) = s.find('<')
+        && let Some(end) = s.rfind('>')
+        && start < end
+    {
+        let name = s[..start].trim();
+        let email = s[start + 1..end].trim();
+        let addr: lettre::Address = email.parse()?;
+        if name.is_empty() {
+            return Ok(lettre::message::Mailbox::new(None, addr));
+        } else {
+            let clean_name = name.trim_matches('"').to_string();
+            return Ok(lettre::message::Mailbox::new(Some(clean_name), addr));
+        }
+    }
+    let addr: lettre::Address = s.parse()?;
+    Ok(lettre::message::Mailbox::new(None, addr))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_email_parsing() {
+        let addr_str = "\"Thomas Richard (TI)\" <thomas.richard@bootlin.com>";
+        let parsed = parse_lenient(addr_str);
+        assert!(parsed.is_ok(), "Failed to parse: {:?}", parsed.err());
+        assert_eq!(
+            format!("{}", parsed.unwrap()),
+            "\"Thomas Richard (TI)\" <thomas.richard@bootlin.com>"
+        );
+    }
+
+    #[test]
+    fn test_email_parsing_unquoted() {
+        let addr_str = "Thomas Richard (TI) <thomas.richard@bootlin.com>";
+        let parsed = parse_lenient(addr_str);
+        assert!(parsed.is_ok(), "Failed to parse: {:?}", parsed.err());
+        assert_eq!(
+            format!("{}", parsed.unwrap()),
+            "\"Thomas Richard (TI)\" <thomas.richard@bootlin.com>"
+        );
+    }
+
+    #[test]
+    fn test_email_parsing_plain() {
+        let addr_str = "thomas.richard@bootlin.com";
+        let parsed = parse_lenient(addr_str);
+        assert!(parsed.is_ok(), "Failed to parse: {:?}", parsed.err());
+        // We will see what format!() returns for plain email
+        info!("Plain email formatted: {}", parsed.as_ref().unwrap());
     }
 }
