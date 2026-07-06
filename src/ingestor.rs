@@ -430,9 +430,17 @@ impl Ingestor {
                         let msg = e.to_string();
                         // 423 is "No such article number in this group"
                         if msg.contains("423") {
-                            warn!("Article {} missing (423), skipping", next_id);
-                            self.db.update_last_article_num(group_name, next_id).await?;
-                            current = next_id;
+                            if next_id >= info.high {
+                                info!(
+                                    "Article {} missing (423) at tip for group {}, retrying later",
+                                    next_id, group_name
+                                );
+                                break;
+                            } else {
+                                warn!("Article {} missing (423) below tip, skipping", next_id);
+                                self.db.update_last_article_num(group_name, next_id).await?;
+                                current = next_id;
+                            }
                         } else {
                             error!("Failed to fetch article {}: {}", next_id, e);
                             break; // Stop and retry later (transient error or connection lost)
