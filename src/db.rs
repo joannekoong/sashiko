@@ -616,7 +616,6 @@ impl Database {
             .execute("ALTER TABLE findings DROP COLUMN line_number", ())
             .await;
 
-        let _ = self.migrate_tool_usages().await;
         let _ = self
             .try_create_index("idx_patchsets_date", "patchsets", "date DESC")
             .await;
@@ -886,71 +885,6 @@ impl Database {
         Ok(())
     }
 
-    pub async fn migrate_tool_usages(&self) -> Result<()> {
-        // 1. Check if we have logs to parse
-        info!("Migration: Checking for tool usages to backfill...");
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT r.id, r.logs, r.provider, r.model 
-             FROM reviews r 
-             LEFT JOIN tool_usages t ON r.id = t.review_id 
-             WHERE r.status IN ('Reviewed', 'Failed') AND r.logs IS NOT NULL AND t.id IS NULL
-             GROUP BY r.id",
-                (),
-            )
-            .await?;
-
-        while let Ok(Some(row)) = rows.next().await {
-            let review_id: i64 = row.get(0)?;
-            let logs: String = row.get(1)?;
-            let provider: String = row.get(2).unwrap_or_else(|_| "unknown".to_string());
-            let model: String = row.get(3).unwrap_or_else(|_| "unknown".to_string());
-
-            // Parse logs (simple JSON array parsing)
-            if let Ok(history) = serde_json::from_str::<Vec<serde_json::Value>>(&logs) {
-                for item in history {
-                    if let Some(parts) = item.get("parts").and_then(|p| p.as_array()) {
-                        for part in parts {
-                            // Check for function call
-                            if let Some(call) = part.get("functionCall") {
-                                let name = call["name"].as_str().unwrap_or("unknown");
-                                let args = call["args"].to_string();
-                                // We need to find the response to get the output length.
-                                // But here we iterate linearly.
-                                // Estimate or find the next part.
-                                // Record usage without output length for now.
-                                // Attempt to find the corresponding functionResponse in subsequent parts.
-                                // The history interleaves them.
-
-                                // Insert what we have for now.
-                                let _ = self
-                                    .create_tool_usage(ToolUsage {
-                                        review_id,
-                                        provider: provider.clone(),
-                                        model: model.clone(),
-                                        tool_name: name.to_string(),
-                                        arguments: Some(args),
-                                        output_length: 0, // Placeholder
-                                    })
-                                    .await;
-                            }
-                            // If we want exact output length, we need to match functionResponse.
-                            // But that might be complex for this simple migration.
-                            if let Some(_resp) = part.get("functionResponse") {
-                                // Update the previous entry.
-                                // Or just ignore output length for backfill.
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        info!("Migration: verified tool usages.");
-        let _ = self.migrate_findings().await;
-        Ok(())
-    }
-
     pub async fn create_finding(&self, finding: Finding) -> Result<()> {
         let preexisting_val = finding.preexisting.map(|b| if b { 1 } else { 0 });
         let locations_val = finding
@@ -971,64 +905,6 @@ impl Database {
                 ],
             )
             .await?;
-        Ok(())
-    }
-
-    pub async fn migrate_findings(&self) -> Result<()> {
-        info!("Migration: Checking for findings to backfill...");
-        // Select reviews that have AI output but maybe no findings in the new table
-        let sql = "SELECT r.id, ai.output_raw
-                   FROM reviews r
-                   JOIN ai_interactions ai ON r.interaction_id = ai.id
-                   LEFT JOIN findings f ON r.id = f.review_id
-                   WHERE r.status = 'Reviewed' AND f.id IS NULL
-                   GROUP BY r.id";
-
-        let mut rows = self.conn.query(sql, ()).await?;
-
-        while let Ok(Some(row)) = rows.next().await {
-            let review_id: i64 = row.get(0)?;
-            let output_raw: String = row.get(1)?;
-
-            // Parse JSON and insert findings
-            if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&output_raw)
-                && let Some(findings_arr) = json_val.get("findings").and_then(|f| f.as_array())
-            {
-                for f in findings_arr {
-                    let severity_str = f["severity"].as_str().unwrap_or("Low");
-
-                    // New format: problem, severity_explanation
-                    // Old format: message
-                    let problem = if let Some(p) = f.get("problem").and_then(|s| s.as_str()) {
-                        p.to_string()
-                    } else {
-                        f["message"].as_str().unwrap_or("").to_string()
-                    };
-
-                    let severity_explanation = f
-                        .get("severity_explanation")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s.to_string());
-
-                    let preexisting = f.get("preexisting").and_then(|v| v.as_bool());
-                    let locations = f.get("locations").cloned();
-
-                    let severity = Severity::from_str(severity_str);
-
-                    let _ = self
-                        .create_finding(Finding {
-                            review_id,
-                            severity,
-                            severity_explanation,
-                            problem,
-                            preexisting,
-                            locations,
-                        })
-                        .await;
-                }
-            }
-        }
-        info!("Migration: verified findings.");
         Ok(())
     }
 
